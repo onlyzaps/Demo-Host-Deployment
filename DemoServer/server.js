@@ -68,7 +68,7 @@ app.get('/api/demos', (req, res) => {
   res.json(allDemos.sort((a, b) => new Date(b.date) - new Date(a.date)));
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Demo server running on port ${PORT}`);
   console.log(`Storage directory is set to ${storageDir}`);

@@ -14,7 +14,7 @@ public class CS2MapBuddyPlugin : BasePlugin
 
     private string CurrentDemoName = "";
     private bool IsRecording = false;
-    private readonly string ApiUrl = "http://YOUR_LINUX_SERVER_IP:3000/upload"; // Change this
+    private readonly string ApiUrl = "http://YOUR_LINUX_SERVER_IP:8080/upload"; // Change this
     
     public override void Load(bool hotReload)
     {

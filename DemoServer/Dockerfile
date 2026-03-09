@@ -12,10 +12,10 @@ COPY . .
 # Setting the environment variable so standard docker-compose usages
 # map directly into this variable.
 ENV STORAGE_DIR=/storage
-ENV PORT=3000
+ENV PORT=8080
 
 # Expose port
-EXPOSE 3000
+EXPOSE 8080
 
 # Start server
 CMD [ "node", "server.js" ]

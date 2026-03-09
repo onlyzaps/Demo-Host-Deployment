@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
   demoserver:
     build: .
     container_name: cs2_demo_server
     ports:
-      - "3000:3000"
+      - "8080:8080"
     environment:
       - STORAGE_DIR=/storage
     volumes:
