@@ -15,6 +15,7 @@ jobs:
       - name: Deploy with Docker Compose
         working-directory: ./DemoServer
         run: |
+          echo "API_SECRET_KEY=${{ secrets.API_SECRET_KEY }}" > .env
           # Stop existing container if it's running
           docker compose down
           
