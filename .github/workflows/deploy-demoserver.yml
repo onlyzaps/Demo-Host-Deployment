@@ -1,13 +1,6 @@
 name: Deploy DemoServer
 
 on:
-  push:
-    branches:
-      - main
-      - master
-    paths:
-      - 'DemoServer/**'
-      - '.github/workflows/deploy-demoserver.yml'
   workflow_dispatch: # Allows manual trigger
 
 jobs:
