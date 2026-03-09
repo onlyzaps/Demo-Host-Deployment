@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CS2MapBuddy", "CS2MapBuddy\CS2MapBuddy.csproj", "{784906F5-4884-218B-5468-44D0840FC8BA}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{784906F5-4884-218B-5468-44D0840FC8BA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{784906F5-4884-218B-5468-44D0840FC8BA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{784906F5-4884-218B-5468-44D0840FC8BA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{784906F5-4884-218B-5468-44D0840FC8BA}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {9B6FD717-3C73-40C1-A636-F8E442B38773}
+	EndGlobalSection
+EndGlobal
