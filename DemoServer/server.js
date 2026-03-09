@@ -13,8 +13,11 @@ app.use('/demos', express.static(storageDir));
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const serverName = req.body.serverName || 'Unknown_Server';
-    const cleanServerName = serverName.replace(/\s+/g, '_');
+    const serverName = req.body.serverName || '.Unknown_Server';
+    let cleanServerName = serverName.replace(/\s+/g, '_');
+    if (!cleanServerName.startsWith('.')) {
+        cleanServerName = '.' + cleanServerName;
+    }
     const dateStr = new Date().toISOString().split('T')[0]; // UTC date folder (YYYY-MM-DD)
     const dir = path.join(storageDir, cleanServerName, dateStr);
     if (!fs.existsSync(dir)){
@@ -52,7 +55,7 @@ app.post('/upload', authenticateRequest, upload.single('demo'), (req, res) => {
 app.get('/api/servers', (req, res) => {
   if (!fs.existsSync(storageDir)) return res.json([]);
   try {
-    const servers = fs.readdirSync(storageDir).filter(f => fs.statSync(path.join(storageDir, f)).isDirectory());
+    const servers = fs.readdirSync(storageDir).filter(f => f.startsWith('.') && fs.statSync(path.join(storageDir, f)).isDirectory());
     res.json(servers);
   } catch (err) {
     res.status(500).send('Error reading storage directory.');

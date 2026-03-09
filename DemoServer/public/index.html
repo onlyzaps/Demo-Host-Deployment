@@ -83,17 +83,6 @@
     
     <!-- Left Navigation / Server & Date Selectors -->
     <div class="sb-left-panel">
-        <nav class="left-nav-bar">
-            <div class="mobile-nav-header">
-                <span class="mobile-nav-title">Menu</span>
-            </div>
-            
-            <div class="nav-links nav-open">
-                <a href="#" class="nav-tab active">Match Demos</a>
-                <a href="/" class="nav-tab">Live Match Stats</a>
-            </div>
-        </nav>
-        
         <div class="left-panel-content">
             <div class="nav-header-title" id="left-nav-title">Select Server</div>
             <div id="left-nav-content">
@@ -134,7 +123,8 @@
     function updateBreadcrumbs() {
         let bc = `<span onclick="loadServers()">All Servers</span>`;
         if (currentServer) {
-            bc += ` > <span onclick="loadDates('${currentServer}')">${currentServer}</span>`;
+            let displayServer = currentServer.replace(/^\./, '').replace(/_/g, ' ');
+            bc += ` > <span onclick="loadDates('${currentServer}')">${displayServer}</span>`;
         }
         if (currentDate) {
             bc += ` > <span style="color:#fff;">${currentDate}</span>`;
@@ -162,7 +152,7 @@
                 navContent.innerHTML = '<div style="padding:15px;text-align:center;color:var(--text-secondary);">No servers found.</div>';
                 return;
             }
-            navContent.innerHTML = servers.map(s => `<div class="list-item" onclick="loadDates('${s}')">🖧 ${s.replace(/_/g, ' ')}</div>`).join('');
+            navContent.innerHTML = servers.map(s => `<div class="list-item" onclick="loadDates('${s}')">🖧 ${s.replace(/^\\./, '').replace(/_/g, ' ')}</div>`).join('');
         } catch(e) {
             navContent.innerHTML = '<div style="padding:15px;text-align:center; color:red;">Failed to load.</div>';
         }
@@ -179,7 +169,7 @@
         
         navTitle.textContent = "Select Date";
         navContent.innerHTML = '<div style="padding:15px;text-align:center;">Loading...</div>';
-        mainContent.innerHTML = `<div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a date on the left to view demos for ${server.replace(/_/g, ' ')}.</div>`;
+        mainContent.innerHTML = `<div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a date on the left to view demos for ${server.replace(/^\\./, '').replace(/_/g, ' ')}.</div>`;
 
         try {
             const res = await fetch(`/api/servers/${server}/dates`);
