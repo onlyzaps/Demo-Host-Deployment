@@ -1,0 +1,29 @@
+name: Deploy DemoServer
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'DemoServer/**'
+      - '.github/workflows/deploy-demoserver.yml'
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  deploy:
+    name: Build & Deploy DemoServer Container
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy with Docker Compose
+        working-directory: ./DemoServer
+        run: |
+          # Stop existing container if it's running
+          docker compose down
+          
+          # Rebuild and start the container as a daemon
+          docker compose up -d --build
