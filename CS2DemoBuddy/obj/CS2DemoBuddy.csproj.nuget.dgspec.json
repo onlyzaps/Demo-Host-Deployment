@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj": {}
+    "c:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj": {}
   },
   "projects": {
-    "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj": {
+    "c:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj",
+        "projectUniqueName": "c:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj",
         "projectName": "CS2DemoBuddy",
-        "projectPath": "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj",
+        "projectPath": "c:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj",
         "packagesPath": "C:\\Users\\vindict6\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\obj\\",
+        "outputPath": "c:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"

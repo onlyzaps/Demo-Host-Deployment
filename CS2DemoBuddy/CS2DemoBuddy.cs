@@ -10,13 +10,12 @@ namespace CS2DemoBuddy;
 
 public class CS2DemoBuddyConfig : BasePluginConfig
 {
-    // IMPORTANT: No spaces are allowed in the server name. Please use underscores instead of spaces, e.g. "My_Awesome_Server"
     [JsonPropertyName("ServerName")]
-    public string ServerName { get; set; } = "My_Server"; 
+    public string ServerName { get; set; } = "My_Server";
 
     [JsonPropertyName("ApiUrl")]
     public string ApiUrl { get; set; } = "http://YOUR_LINUX_SERVER_IP:8080/upload";
-
+    
     [JsonPropertyName("ApiSecretKey")]
     public string ApiSecretKey { get; set; } = "";
 }
@@ -58,7 +57,7 @@ public class DemoHistoryTracker
 
                 if (!root.Elements("Demo").Any(e => e.Attribute("FileName")?.Value == fileName))
                 {
-                    root.Add(new XElement("Demo", 
+                    root.Add(new XElement("Demo",
                         new XAttribute("FileName", fileName),
                         new XAttribute("ServerName", serverName)));
                     doc.Save(_xmlFilePath);
@@ -116,7 +115,7 @@ public class DemoHistoryTracker
 public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 {
     public override string ModuleName => "CS2DemoBuddy";
-    public override string ModuleVersion => "1.3.0";
+    public override string ModuleVersion => "1.3.1";
     public override string ModuleAuthor => "GitHub Copilot";
 
     public CS2DemoBuddyConfig Config { get; set; } = new();
@@ -128,7 +127,6 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         Console.WriteLine($"[CS2DemoBuddy] {message}");
         string logEntry = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}";
         
-        // 1. Write Log Locally
         try
         {
             string configDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../configs/plugins/CS2DemoBuddy"));
@@ -136,7 +134,6 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             if (!Directory.Exists(logsDir)) Directory.CreateDirectory(logsDir);
 
             string logFile = Path.Combine(logsDir, $"CS2DemoBuddy_{DateTime.UtcNow:yyyy-MM-dd}.log");
-            
             lock (_logLock)
             {
                 File.AppendAllText(logFile, logEntry);
@@ -147,13 +144,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             Console.WriteLine($"[CS2DemoBuddy] Failed to write to log: {ex.Message}");
         }
 
-        // 2. Post Log to Node API
         try
         {
             string logEndpoint = Config.ApiUrl.Replace("/upload", "/upload-log");
             string apiKey = Config.ApiSecretKey;
             string serverName = Config.ServerName;
-            
+
             Task.Run(async () => {
                 try {
                     using var client = new HttpClient();
@@ -164,15 +160,14 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                     });
                     var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
                     await client.PostAsync(logEndpoint, content);
-                } catch { } // fail silently on api upload issues
+                } catch { } 
             });
-        } 
+        }
         catch { }
     }
 
     public void OnConfigParsed(CS2DemoBuddyConfig config)
     {
-        // Enforce no spaces rule
         if (config.ServerName.Contains(" "))
         {
             config.ServerName = config.ServerName.Replace(" ", "_");
@@ -182,32 +177,28 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private string CurrentDemoName = "";
     private bool IsRecording = false;
-    
+
     public override void Load(bool hotReload)
     {
         Log("Plugin loading...");
 
-        // Initialize history tracker inside configs folder
         string configDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../configs/plugins/CS2DemoBuddy"));
         if (!Directory.Exists(configDir)) Directory.CreateDirectory(configDir);
         HistoryTracker = new DemoHistoryTracker(configDir, Log);
 
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
-        
-        // Handle immediate game state transitions or vote plugin map changes
+
         RegisterEventHandler<EventCsWinPanelMatch>((@event, info) => {
             StopAndUploadDemo();
             return HookResult.Continue;
         });
 
-        // Ensure voice and text are recorded via SourceTV configs
         Server.ExecuteCommand("tv_enable 1");
         Server.ExecuteCommand("tv_transmitall 1");
 
-        // Schedule garbage collection timer every hour (3600 seconds)
         AddTimer(3600.0f, RunGarbageCollection, TimerFlags.REPEAT);
-        
+
         Log("Plugin completely loaded. Garbage collection initialized for 1 hour intervals.");
     }
 
@@ -217,13 +208,13 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         string timestamp = DateTime.UtcNow.ToString("MM-dd-yy_HH-mm-ss");
         CurrentDemoName = $"{mapName}_{timestamp}";
-        
+
         string demoFileName = $"{CurrentDemoName}.dem";
         HistoryTracker?.AddDemo(demoFileName, Config.ServerName);
 
         Server.ExecuteCommand($"tv_record {CurrentDemoName}");
         IsRecording = true;
-        
+
         Log($"Started recording demo: {demoFileName}");
     }
 
@@ -235,55 +226,115 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private void StopAndUploadDemo()
     {
         if (!IsRecording) return;
-        
+
         Server.ExecuteCommand("tv_stoprecord");
         IsRecording = false;
-        
+
         string demoFileName = $"{CurrentDemoName}.dem";
-        string filePath = Path.Combine(Server.GameDirectory, "csgo", demoFileName);
+        Log($"Stopped recording. Awaiting disk flush before upload: {demoFileName}");
 
-        Log($"Stopped recording. Preparing to upload: {demoFileName}");
+        string baseDir = Server.GameDirectory; 
+        string parentDir = Directory.GetParent(baseDir)?.FullName ?? baseDir; 
 
-        // Use a timer to wait briefly to make sure the server finishes writing the file to disk
-        AddTimer(3.0f, () => {
-            UploadAndDeleteDemoRoutine(filePath, demoFileName);
+        // Offload file finding and uploading to a separate task so we don't freeze the game tick
+        Task.Run(async () =>
+        {
+            await Task.Delay(4000); // Initial grace period
+
+            string[] searchPaths = new[]
+            {
+                Path.Combine(baseDir, demoFileName),
+                Path.Combine(baseDir, "csgo", demoFileName),
+                Path.Combine(parentDir, "csgo", demoFileName),
+                Path.Combine(parentDir, "bin", "linuxsteamrt64", demoFileName),
+                Path.Combine(parentDir, "bin", "win64", demoFileName)
+            }.Distinct().ToArray();
+
+            string? foundPath = null;
+
+            // Give the engine up to 15 seconds to finish writing the demo flush to disk
+            for (int i = 0; i < 5; i++)
+            {
+                foreach (var p in searchPaths)
+                {
+                    if (File.Exists(p) && new FileInfo(p).Length > 0)
+                    {
+                        foundPath = p;
+                        break;
+                    }
+                }
+                
+                if (foundPath != null) break;
+                await Task.Delay(3000);
+            }
+
+            if (foundPath != null)
+            {
+                Log($"Locating demo... success! Found demo file at: {foundPath}");
+                UploadAndDeleteDemoRoutine(foundPath, demoFileName);
+            }
+            else
+            {
+                Log($"Error: Demo file not found after 15 seconds of waiting. Expected: {demoFileName}. File might be locked or directory is non-standard. The Garbage Collector will retry this in 60 minutes.");
+            }
         });
     }
 
     private void RunGarbageCollection()
     {
         Log("Running scheduled garbage collection for demos...");
-        string csgoPath = Path.Combine(Server.GameDirectory, "csgo");
-        var demoFiles = Directory.GetFiles(csgoPath, "*.dem");
-
-        foreach (var filePath in demoFiles)
+        
+        string baseDir = Server.GameDirectory;
+        string parentDir = Directory.GetParent(baseDir)?.FullName ?? baseDir;
+        
+        string[] possibleDirs = new[]
         {
-            string fileName = Path.GetFileName(filePath);
+            baseDir,
+            Path.Combine(baseDir, "csgo"),
+            Path.Combine(parentDir, "csgo"),
+            Path.Combine(parentDir, "bin", "linuxsteamrt64"),
+            Path.Combine(parentDir, "bin", "win64")
+        }.Distinct().ToArray();
 
-            // Skip the current explicitly recording demo
-            if (IsRecording && fileName == $"{CurrentDemoName}.dem")
-                continue;
+        int foundCount = 0;
 
-            string? targetServerName = HistoryTracker?.GetTargetServerName(fileName);
+        foreach (var dir in possibleDirs)
+        {
+            if (!Directory.Exists(dir)) continue;
 
-            if (targetServerName == null)
+            var demoFiles = Directory.GetFiles(dir, "*.dem");
+            foreach (var filePath in demoFiles)
             {
-                Log($"GC: Deleting untracked demo file {fileName}");
-                try { File.Delete(filePath); } catch { }
-            }
-            else
-            {
-                Log($"GC: Retrying failed upload for demo {fileName}");
-                UploadAndDeleteDemoRoutine(filePath, fileName, targetServerName);
+                string fileName = Path.GetFileName(filePath);
+
+                // Skip the currently actively recording demo
+                if (IsRecording && fileName == $"{CurrentDemoName}.dem")
+                    continue;
+
+                foundCount++;
+
+                string? targetServerName = HistoryTracker?.GetTargetServerName(fileName);
+                if (targetServerName == null)
+                {
+                    Log($"GC: Deleting untracked demo file {fileName}");
+                    try { File.Delete(filePath); } catch { }
+                }
+                else
+                {
+                    Log($"GC: Retrying failed upload for demo {fileName}");
+                    UploadAndDeleteDemoRoutine(filePath, fileName, targetServerName);
+                }
             }
         }
+        
+        Log($"Garbage collection finished scanning {possibleDirs.Length} paths. Processed {foundCount} stale files.");
     }
 
     private async void UploadAndDeleteDemoRoutine(string filePath, string fileName, string? serverNameFallback = null)
     {
         if (!File.Exists(filePath))
         {
-            Log($"Error: Demo file not found at {filePath}");
+            Log($"Upload Routine Error: Demo file not found at {filePath}");
             HistoryTracker?.RemoveDemo(fileName);
             return;
         }
@@ -293,14 +344,15 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         try
         {
             using var client = new HttpClient();
+            client.Timeout = TimeSpan.FromMinutes(10); // Allow time for large demo uploads
             client.DefaultRequestHeaders.Add("x-api-key", Config.ApiSecretKey);
             using var form = new MultipartFormDataContent();
-            
-            using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+
+            using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var streamContent = new StreamContent(fileStream);
-            
+
             form.Add(new StringContent(targetServerName), "serverName");
-            
+
             streamContent.Headers.ContentType = MediaTypeHeaderValue.Parse("application/octet-stream");
             form.Add(streamContent, "demo", fileName);
 
@@ -316,7 +368,8 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             }
             else
             {
-                Log($"Failed to upload {fileName}. Status code: {response.StatusCode}");
+                string respError = await response.Content.ReadAsStringAsync();
+                Log($"Failed to upload {fileName}. Status code: {response.StatusCode} | {respError}");
             }
         }
         catch (Exception ex)
