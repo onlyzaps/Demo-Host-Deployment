@@ -1,0 +1,66 @@
+/* === Maintenance / Error Overlay === */
+.maintenance-overlay {
+    position: fixed; 
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background-color: #1b1e24; /* Matching site base */
+    z-index: 9999;
+}
+
+.maintenance-content {
+    text-align: center;
+    padding: 2rem;
+}
+
+.maintenance-title {
+    font-family: 'Inter', sans-serif;
+    font-size: 1.5rem;
+    font-weight: 300;
+    color: rgba(255, 255, 255, 0.6); /* Faint white */
+    margin-bottom: 0.5rem;
+    letter-spacing: 0.5px;
+}
+
+.maintenance-subtext {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.85rem;
+    color: rgba(255, 255, 255, 0.2); /* Very faint error details */
+    margin-bottom: 2rem;
+}
+
+/* === Professional Restart Button === */
+.admin-actions {
+    display: flex;
+    justify-content: center;
+}
+
+.btn-professional-restart {
+    display: inline-block;
+    padding: 10px 24px;
+    background-color: #3b82f6; /* Professional Blue */
+    color: #ffffff !important;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 500;
+    text-decoration: none !important;
+    border-radius: 6px;
+    border: none;
+    transition: background-color 0.2s, transform 0.1s;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.btn-professional-restart:hover {
+    background-color: #2563eb;
+    cursor: pointer;
+}
+
+.btn-professional-restart:active {
+    transform: translateY(1px);
+    background-color: #1d4ed8;
+}
+

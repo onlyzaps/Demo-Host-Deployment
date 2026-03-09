@@ -1,0 +1,13 @@
+services:
+  demoserver:
+    build: .
+    container_name: cs2_demo_server
+    ports:
+      - "8080:8080"
+    environment:
+      - STORAGE_DIR=/storage
+      - API_SECRET_KEY=${API_SECRET_KEY}
+    volumes:
+      # Bind mount the host's /storage directory to the container's /storage directory
+      - /storage:/storage
+    restart: unless-stopped

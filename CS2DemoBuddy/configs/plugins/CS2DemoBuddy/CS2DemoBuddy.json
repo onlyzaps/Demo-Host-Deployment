@@ -1,0 +1,6 @@
+{
+  "ServerName": "My_Server_Name",
+  "ApiUrl": "http://YOUR_LINUX_SERVER_IP:8080/upload",
+  "ApiSecretKey": "",
+  "ConfigVersion": 1
+}

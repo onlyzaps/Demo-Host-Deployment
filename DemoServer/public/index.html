@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="OnlyZaps.gg Match Demos">
+<title>OnlyZaps.gg - Match Demos</title>
+<link rel="stylesheet" href="./css/main.css">
+<link rel="stylesheet" href="./css/server_info.css">
+<link rel="icon" type="image/x-icon" href="/images/favicon2.ico">
+<style>
+    .sb-left-panel { min-height: 500px; }
+    .sb-right-panel { overflow-y: auto; }
+    .list-item { 
+        padding: 15px; 
+        border-bottom: 1px solid rgba(255,255,255,0.05); 
+        cursor: pointer; 
+        transition: background 0.2s; 
+        font-family: 'Inter', sans-serif;
+        color: #fff;
+    }
+    .list-item:hover { background-color: rgba(255,170,0,0.1); color: #ffaa00; }
+    .list-item.active { background-color: rgba(255,170,0,0.2); color: #ffaa00; border-left: 3px solid #ffaa00; }
+    .breadcrumb-row { 
+        padding: 10px 20px; 
+        background: rgba(0,0,0,0.3); 
+        color: var(--text-secondary); 
+        font-size: 0.95rem; 
+        display: flex;
+        gap: 10px;
+        align-items: center;
+    }
+    .breadcrumb-row span { cursor: pointer; color: var(--accent-color); transition: color 0.2s; }
+    .breadcrumb-row span:hover { color: #fff; }
+    
+    .demo-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+    .demo-table th { background: rgba(0,0,0,0.4); color: var(--accent-color); padding: 12px; text-align: left; font-size: 0.85rem; text-transform: uppercase; }
+    .demo-table td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.95rem; }
+    .demo-table tr:hover td { background-color: rgba(255,255,255,0.02); }
+    .download-btn {
+        background-color: var(--btn-bg);
+        color: var(--text-primary);
+        padding: 6px 12px;
+        border-radius: 4px;
+        text-decoration: none;
+        font-size: 0.85rem;
+        transition: background 0.2s;
+        display: inline-block;
+    }
+    .download-btn:hover { background-color: var(--btn-hover); color: #fff; }
+    
+    .nav-header-title { padding: 15px; font-weight: bold; color: var(--text-secondary); border-bottom: 2px solid rgba(0,0,0,0.3); background: rgba(0,0,0,0.2); }
+    .panel-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 15px 20px; background: var(--bg-secondary); border-bottom: 1px solid rgba(255,255,255,0.05); }
+    .view-title { font-family: var(--font-heading); font-size: 1.2rem; color: #fff; }
+</style>
+</head>
+
+<body>
+
+<div class="site-header">
+	<div class="left-header-buttons">
+        <a href="https://steamcommunity.com/chat/invite/nTuCcXpe" class="circle-header-btn">
+            <img src="./images/steam.png" alt="Steam Chat">
+        </a>
+        <a href="https://discord.gg/NdHJZcGwUx" class="circle-header-btn">
+            <img src="./images/discord.png" alt="Discord">
+        </a>
+    </div>
+
+    <div class="site-header-center">
+        <div class="site-logo"><svg class="site-logo-bolt" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 2v11h3v9l7-12h-4l4-8H7z"/></svg>OnlyZaps.gg</div>
+		<div class="site-tagline">Match Demos</div>
+	</div>
+
+    <div class="right-header-buttons">
+		<a href="https://buymeacoffee.com/onlyzaps.gg" target="_blank" class="bmc-btn">
+            <img src="./images/bmc-button.png" alt="Buy Me a Coffee">
+		</a>
+    </div>
+</div>
+
+<div class="scoreboard-container" id="main-container">
+    
+    <!-- Left Navigation / Server & Date Selectors -->
+    <div class="sb-left-panel">
+        <nav class="left-nav-bar">
+            <div class="mobile-nav-header">
+                <span class="mobile-nav-title">Menu</span>
+            </div>
+            
+            <div class="nav-links nav-open">
+                <a href="#" class="nav-tab active">Match Demos</a>
+                <a href="/" class="nav-tab">Live Match Stats</a>
+            </div>
+        </nav>
+        
+        <div class="left-panel-content">
+            <div class="nav-header-title" id="left-nav-title">Select Server</div>
+            <div id="left-nav-content">
+                <!-- Javascript injects servers/dates here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Right Window / Demo Download Viewer -->
+    <div class="sb-right-panel">
+        <div class="panel-toolbar">
+            <div class="view-title">Demo Browser</div>
+            <div class="breadcrumb-row" id="breadcrumbs">
+                <span onclick="loadServers()">All Servers</span>
+            </div>
+        </div>
+
+        <div class="sb-table-wrapper" style="padding: 20px;">
+            <div id="main-content">
+                <div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a Server from the left menu to view available matches.</div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<div class="site-footer">
+    © 2025 OnlyZaps.gg - Premium CS2 Gaming Community<br>
+    OnlyZaps.gg is not affiliated with or endorsed by Valve Corporation.<br>
+	This site was designed by Bone © 2026. <a href="https://buymeacoffee.com/theboneman" target="_blank" style="color: #FFDD00; text-decoration: underline;">Buy Bone a Coffee</a><br>
+    Revision Code: MatchDemos v1.0
+</div>
+
+<script>
+    let currentServer = null;
+    let currentDate = null;
+
+    function updateBreadcrumbs() {
+        let bc = `<span onclick="loadServers()">All Servers</span>`;
+        if (currentServer) {
+            bc += ` > <span onclick="loadDates('${currentServer}')">${currentServer}</span>`;
+        }
+        if (currentDate) {
+            bc += ` > <span style="color:#fff;">${currentDate}</span>`;
+        }
+        document.getElementById('breadcrumbs').innerHTML = bc;
+    }
+
+    async function loadServers() {
+        currentServer = null;
+        currentDate = null;
+        updateBreadcrumbs();
+        
+        const navTitle = document.getElementById('left-nav-title');
+        const navContent = document.getElementById('left-nav-content');
+        const mainContent = document.getElementById('main-content');
+        
+        navTitle.textContent = "Select Server";
+        navContent.innerHTML = '<div style="padding:15px;text-align:center;">Loading...</div>';
+        mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a server on the left to browse dates.</div>';
+        
+        try {
+            const res = await fetch('/api/servers');
+            const servers = await res.json();
+            if(servers.length === 0) {
+                navContent.innerHTML = '<div style="padding:15px;text-align:center;color:var(--text-secondary);">No servers found.</div>';
+                return;
+            }
+            navContent.innerHTML = servers.map(s => `<div class="list-item" onclick="loadDates('${s}')">🖧 ${s.replace(/_/g, ' ')}</div>`).join('');
+        } catch(e) {
+            navContent.innerHTML = '<div style="padding:15px;text-align:center; color:red;">Failed to load.</div>';
+        }
+    }
+
+    async function loadDates(server) {
+        currentServer = server;
+        currentDate = null;
+        updateBreadcrumbs();
+        
+        const navTitle = document.getElementById('left-nav-title');
+        const navContent = document.getElementById('left-nav-content');
+        const mainContent = document.getElementById('main-content');
+        
+        navTitle.textContent = "Select Date";
+        navContent.innerHTML = '<div style="padding:15px;text-align:center;">Loading...</div>';
+        mainContent.innerHTML = `<div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a date on the left to view demos for ${server.replace(/_/g, ' ')}.</div>`;
+
+        try {
+            const res = await fetch(`/api/servers/${server}/dates`);
+            const dates = await res.json();
+            
+            // Add a Back Button at top of left nav
+            let html = `<div class="list-item" style="background: rgba(255,255,255,0.05);" onclick="loadServers()">← Back to Servers</div>`;
+            
+            if(dates.length === 0) {
+                html += '<div style="padding:15px;text-align:center;color:var(--text-secondary);">No dates found.</div>';
+                navContent.innerHTML = html;
+                return;
+            }
+            
+            html += dates.map(d => `<div class="list-item" onclick="loadDemos('${server}', '${d}', this)">📅 ${d}</div>`).join('');
+            navContent.innerHTML = html;
+        } catch(e) {
+            navContent.innerHTML = '<div style="padding:15px;text-align:center; color:red;">Failed to load.</div>';
+        }
+    }
+
+    async function loadDemos(server, date, element) {
+        currentDate = date;
+        updateBreadcrumbs();
+        
+        // Handle active state styling on the left panel
+        if (element) {
+            document.querySelectorAll('.list-item').forEach(el => el.classList.remove('active'));
+            element.classList.add('active');
+        }
+
+        const mainContent = document.getElementById('main-content');
+        mainContent.innerHTML = '<div style="text-align:center; padding: 40px;">Loading matches...</div>';
+
+        try {
+            const res = await fetch(`/api/servers/${server}/dates/${date}/demos`);
+            const demos = await res.json();
+            
+            if(demos.length === 0) {
+                mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:var(--text-secondary);">No match demos found for this date.</div>';
+                return;
+            }
+
+            let html = `
+            <table class="demo-table">
+                <thead>
+                    <tr>
+                        <th>Map / Name</th>
+                        <th>Time Recorded</th>
+                        <th>File Size</th>
+                        <th>Download</th>
+                    </tr>
+                </thead>
+                <tbody>
+            `;
+            demos.forEach(demo => {
+                // Parse map name from the demo format string if possible (mapname_MM-DD-YY_hh-mm-ss)
+                let friendlyName = demo.name.replace('.dem', '');
+                let mapParts = friendlyName.split('_');
+                let displayMap = mapParts.length > 0 ? mapParts[0] : friendlyName;
+
+                html += `
+                    <tr>
+                        <td style="font-weight:bold; color:#fff;">${displayMap} <div style="font-size:0.75rem; color:var(--text-secondary); font-weight:normal;">${demo.name}</div></td>
+                        <td>${new Date(demo.date).toLocaleTimeString()}</td>
+                        <td style="font-family:monospace;">${demo.size}</td>
+                        <td><a href="/demos/${demo.path}" download class="download-btn">Download .dem</a></td>
+                    </tr>
+                `;
+            });
+            html += `</tbody></table>`;
+            mainContent.innerHTML = html;
+        } catch(e) {
+            mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:red;">Error loading demos. Internal server error.</div>';
+        }
+    }
+
+    // Init
+    loadServers();
+</script>
+</body>
+</html>
