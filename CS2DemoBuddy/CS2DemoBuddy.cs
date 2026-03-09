@@ -4,6 +4,7 @@ using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Timers;
 using System.Net.Http.Headers;
 using System.Text.Json.Serialization;
+using System.Xml.Linq;
 
 namespace CS2DemoBuddy;
 
@@ -20,13 +21,154 @@ public class CS2DemoBuddyConfig : BasePluginConfig
     public string ApiSecretKey { get; set; } = "";
 }
 
+public class DemoHistoryTracker
+{
+    private readonly string _xmlFilePath;
+    private readonly object _lock = new object();
+    private readonly Action<string> _logger;
+
+    public DemoHistoryTracker(string configDirectory, Action<string> logger)
+    {
+        _logger = logger;
+        _xmlFilePath = Path.Combine(configDirectory, "demo_history.xml");
+        InitializeXml();
+    }
+
+    private void InitializeXml()
+    {
+        lock (_lock)
+        {
+            if (!File.Exists(_xmlFilePath))
+            {
+                var doc = new XDocument(new XElement("DemoHistory"));
+                doc.Save(_xmlFilePath);
+            }
+        }
+    }
+
+    public void AddDemo(string fileName, string serverName)
+    {
+        lock (_lock)
+        {
+            try
+            {
+                var doc = File.Exists(_xmlFilePath) ? XDocument.Load(_xmlFilePath) : new XDocument(new XElement("DemoHistory"));
+                var root = doc.Element("DemoHistory") ?? new XElement("DemoHistory");
+                if (doc.Element("DemoHistory") == null) doc.Add(root);
+
+                if (!root.Elements("Demo").Any(e => e.Attribute("FileName")?.Value == fileName))
+                {
+                    root.Add(new XElement("Demo", 
+                        new XAttribute("FileName", fileName),
+                        new XAttribute("ServerName", serverName)));
+                    doc.Save(_xmlFilePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger($"XML Tracker Error (Add): {ex.Message}");
+            }
+        }
+    }
+
+    public void RemoveDemo(string fileName)
+    {
+        lock (_lock)
+        {
+            try
+            {
+                if (!File.Exists(_xmlFilePath)) return;
+                var doc = XDocument.Load(_xmlFilePath);
+                var elements = doc.Element("DemoHistory")?.Elements("Demo").Where(e => e.Attribute("FileName")?.Value == fileName).ToList();
+                if (elements != null && elements.Any())
+                {
+                    foreach(var el in elements) el.Remove();
+                    doc.Save(_xmlFilePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger($"XML Tracker Error (Remove): {ex.Message}");
+            }
+        }
+    }
+
+    public string? GetTargetServerName(string fileName)
+    {
+        lock (_lock)
+        {
+            try
+            {
+                if (!File.Exists(_xmlFilePath)) return null;
+                var doc = XDocument.Load(_xmlFilePath);
+                var el = doc.Element("DemoHistory")?.Elements("Demo").FirstOrDefault(e => e.Attribute("FileName")?.Value == fileName);
+                return el?.Attribute("ServerName")?.Value;
+            }
+            catch (Exception ex)
+            {
+                _logger($"XML Tracker Error (Get): {ex.Message}");
+                return null;
+            }
+        }
+    }
+}
+
 public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 {
     public override string ModuleName => "CS2DemoBuddy";
-    public override string ModuleVersion => "1.1.0";
+    public override string ModuleVersion => "1.3.0";
     public override string ModuleAuthor => "GitHub Copilot";
 
     public CS2DemoBuddyConfig Config { get; set; } = new();
+    private DemoHistoryTracker? HistoryTracker;
+    private static readonly object _logLock = new object();
+
+    private void Log(string message)
+    {
+        Console.WriteLine($"[CS2DemoBuddy] {message}");
+        string logEntry = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}";
+        
+        // 1. Write Log Locally
+        try
+        {
+            string configDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../configs/plugins/CS2DemoBuddy"));
+            string logsDir = Path.Combine(configDir, "logs");
+            if (!Directory.Exists(logsDir)) Directory.CreateDirectory(logsDir);
+
+            string logFile = Path.Combine(logsDir, $"CS2DemoBuddy_{DateTime.UtcNow:yyyy-MM-dd}.log");
+            
+            lock (_logLock)
+            {
+                File.AppendAllText(logFile, logEntry);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[CS2DemoBuddy] Failed to write to log: {ex.Message}");
+        }
+
+        // 2. Post Log to Node API
+        try
+        {
+            string logEndpoint = Config.ApiUrl.Replace("/upload", "/upload-log");
+            string apiKey = Config.ApiSecretKey;
+            string serverName = Config.ServerName;
+            
+            Task.Run(async () => {
+                try {
+                    using var client = new HttpClient();
+                    client.DefaultRequestHeaders.Add("x-api-key", apiKey);
+                    var json = System.Text.Json.JsonSerializer.Serialize(new {
+                        serverName = serverName,
+                        log = logEntry
+                    });
+                    var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+                    await client.PostAsync(logEndpoint, content);
+                } catch { } // fail silently on api upload issues
+            });
+        } 
+        catch { }
+    }
 
     public void OnConfigParsed(CS2DemoBuddyConfig config)
     {
@@ -43,6 +185,13 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     
     public override void Load(bool hotReload)
     {
+        Log("Plugin loading...");
+
+        // Initialize history tracker inside configs folder
+        string configDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../configs/plugins/CS2DemoBuddy"));
+        if (!Directory.Exists(configDir)) Directory.CreateDirectory(configDir);
+        HistoryTracker = new DemoHistoryTracker(configDir, Log);
+
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
         
@@ -55,6 +204,11 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // Ensure voice and text are recorded via SourceTV configs
         Server.ExecuteCommand("tv_enable 1");
         Server.ExecuteCommand("tv_transmitall 1");
+
+        // Schedule garbage collection timer every hour (3600 seconds)
+        AddTimer(3600.0f, RunGarbageCollection, TimerFlags.REPEAT);
+        
+        Log("Plugin completely loaded. Garbage collection initialized for 1 hour intervals.");
     }
 
     private void OnMapStart(string mapName)
@@ -63,10 +217,14 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         string timestamp = DateTime.UtcNow.ToString("MM-dd-yy_HH-mm-ss");
         CurrentDemoName = $"{mapName}_{timestamp}";
+        
+        string demoFileName = $"{CurrentDemoName}.dem";
+        HistoryTracker?.AddDemo(demoFileName, Config.ServerName);
+
         Server.ExecuteCommand($"tv_record {CurrentDemoName}");
         IsRecording = true;
         
-        Console.WriteLine($"[CS2DemoBuddy] Started recording demo: {CurrentDemoName}.dem");
+        Log($"Started recording demo: {demoFileName}");
     }
 
     private void OnMapEnd()
@@ -82,9 +240,9 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         IsRecording = false;
         
         string demoFileName = $"{CurrentDemoName}.dem";
-        string filePath = Path.Combine(Server.GameDirectory, "csgo", demoFileName); // Path mostly standard for CS2 root
+        string filePath = Path.Combine(Server.GameDirectory, "csgo", demoFileName);
 
-        Console.WriteLine($"[CS2DemoBuddy] Stopped recording. Preparing to upload: {demoFileName}");
+        Log($"Stopped recording. Preparing to upload: {demoFileName}");
 
         // Use a timer to wait briefly to make sure the server finishes writing the file to disk
         AddTimer(3.0f, () => {
@@ -92,13 +250,45 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         });
     }
 
-    private async void UploadAndDeleteDemoRoutine(string filePath, string fileName)
+    private void RunGarbageCollection()
+    {
+        Log("Running scheduled garbage collection for demos...");
+        string csgoPath = Path.Combine(Server.GameDirectory, "csgo");
+        var demoFiles = Directory.GetFiles(csgoPath, "*.dem");
+
+        foreach (var filePath in demoFiles)
+        {
+            string fileName = Path.GetFileName(filePath);
+
+            // Skip the current explicitly recording demo
+            if (IsRecording && fileName == $"{CurrentDemoName}.dem")
+                continue;
+
+            string? targetServerName = HistoryTracker?.GetTargetServerName(fileName);
+
+            if (targetServerName == null)
+            {
+                Log($"GC: Deleting untracked demo file {fileName}");
+                try { File.Delete(filePath); } catch { }
+            }
+            else
+            {
+                Log($"GC: Retrying failed upload for demo {fileName}");
+                UploadAndDeleteDemoRoutine(filePath, fileName, targetServerName);
+            }
+        }
+    }
+
+    private async void UploadAndDeleteDemoRoutine(string filePath, string fileName, string? serverNameFallback = null)
     {
         if (!File.Exists(filePath))
         {
-            Console.WriteLine($"[CS2DemoBuddy] Error: Demo file not found at {filePath}");
+            Log($"Error: Demo file not found at {filePath}");
+            HistoryTracker?.RemoveDemo(fileName);
             return;
         }
+
+        string targetServerName = serverNameFallback ?? Config.ServerName;
 
         try
         {
@@ -106,32 +296,32 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             client.DefaultRequestHeaders.Add("x-api-key", Config.ApiSecretKey);
             using var form = new MultipartFormDataContent();
             
-            using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+            using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
             using var streamContent = new StreamContent(fileStream);
             
-            // Add server name BEFORE the file so the server's multer can read it during file save routing
-            form.Add(new StringContent(Config.ServerName), "serverName");
+            form.Add(new StringContent(targetServerName), "serverName");
             
             streamContent.Headers.ContentType = MediaTypeHeaderValue.Parse("application/octet-stream");
             form.Add(streamContent, "demo", fileName);
 
-            Console.WriteLine($"[CS2DemoBuddy] Uploading {fileName} to {Config.ApiUrl}...");
+            Log($"Uploading {fileName} to {Config.ApiUrl}...");
             var response = await client.PostAsync(Config.ApiUrl, form);
-            
+
             if (response.IsSuccessStatusCode)
             {
-                Console.WriteLine($"[CS2DemoBuddy] Successfully uploaded {fileName}. Deleting local file.");
+                Log($"Successfully uploaded {fileName}. Deleting local file.");
                 fileStream.Close();
                 File.Delete(filePath);
+                HistoryTracker?.RemoveDemo(fileName);
             }
             else
             {
-                Console.WriteLine($"[CS2DemoBuddy] Failed to upload {fileName}. Status code: {response.StatusCode}");
+                Log($"Failed to upload {fileName}. Status code: {response.StatusCode}");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[CS2DemoBuddy] Exception during upload: {ex.Message}");
+            Log($"Exception during upload: {ex.Message}");
         }
     }
 }

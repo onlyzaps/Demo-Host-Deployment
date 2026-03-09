@@ -2530,11 +2530,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2MapBuddy\\CS2MapBuddy.csproj",
-      "projectName": "CS2MapBuddy",
-      "projectPath": "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2MapBuddy\\CS2MapBuddy.csproj",
+      "projectUniqueName": "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj",
+      "projectName": "CS2DemoBuddy",
+      "projectPath": "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj",
       "packagesPath": "C:\\Users\\vindict6\\.nuget\\packages\\",
-      "outputPath": "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2MapBuddy\\obj\\",
+      "outputPath": "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
