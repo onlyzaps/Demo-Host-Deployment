@@ -318,40 +318,40 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private void ApplyGotvSettings()
     {
-        Log("Applying GOTV settings (one-time at load)...");
+        Log("Applying GOTV settings...");
 
         // IMPORTANT: tv_enable is a startup-only cvar in CS2. This command
         // alone will NOT spawn the GOTV bot if it wasn't enabled at server
         // launch. You MUST add +tv_enable 1 to your server startup command
-        // line (or server.cfg) for GOTV to work. Without the GOTV bot,
-        // demos will be tiny/empty — especially with tv_transmitall 1.
+        // line (or server.cfg) for GOTV to work.
         Server.ExecuteCommand("tv_enable 1");
 
-        // No relay delay — engine writes demo data directly
+        // Zero delay — demo data is written immediately to the GOTV buffer
         Server.ExecuteCommand("tv_delay 0");
 
-        // Full POV recording: transmit all player entity data so viewers
-        // can switch between any player's perspective in the demo.
-        // Combined with tv_record_immediate 1, this produces usable demos
-        // even with high player counts (tested up to 64 players).
-        Server.ExecuteCommand("tv_transmitall 1");
+        // tv_transmitall controls what is sent over the NETWORK to live
+        // GOTV spectator clients — NOT what tv_record writes to disk.
+        // tv_record captures the full server state (all players, all ticks)
+        // regardless of this setting. With 20+ players, transmitall 1
+        // overwhelms the GOTV relay and produces ~100KB junk demo files.
+        // All major plugins (MatchZy, Get5) use 0. Demos still support
+        // switching between any player's POV.
+        Server.ExecuteCommand("tv_transmitall 0");
 
-        // Force immediate file writing — critical for per-round recording.
-        // Without this, the engine may not flush demo data until map change,
-        // producing empty/tiny files on tv_stoprecord mid-match.
+        // Immediate file writing — helps ensure demo is flushed on map change
         Server.ExecuteCommand("tv_record_immediate 1");
 
-        Server.ExecuteCommand("tv_relayvoice 1");       // Include voice in recording
+        Server.ExecuteCommand("tv_relayvoice 1");
 
-        // Quality / rate settings tuned for high player counts
-        Server.ExecuteCommand("tv_snapshotrate 20");    // Lower rate to handle 64-player entity load
-        Server.ExecuteCommand("tv_maxrate 0");          // No rate limit on GOTV stream
-        Server.ExecuteCommand("tv_deltacache -1");      // Unlimited delta cache
+        // Quality / rate settings
+        Server.ExecuteCommand("tv_snapshotrate 32");
+        Server.ExecuteCommand("tv_maxrate 0");
+        Server.ExecuteCommand("tv_deltacache -1");
 
         // Autorecord off — we manage recording ourselves
         Server.ExecuteCommand("tv_autorecord 0");
 
-        Log("GOTV settings applied: tv_enable 1, tv_delay 0, tv_transmitall 1, tv_record_immediate 1, tv_snapshotrate 20, tv_maxrate 0, tv_deltacache -1");
+        Log("GOTV settings applied: tv_enable 1, tv_delay 0, tv_transmitall 0, tv_record_immediate 1, tv_snapshotrate 32, tv_maxrate 0");
     }
 
     private void SetupFileWatcher()
