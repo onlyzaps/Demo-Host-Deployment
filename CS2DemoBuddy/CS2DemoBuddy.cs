@@ -241,6 +241,37 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         Log("===== CS2DemoBuddy v3.0.0 LOADED =====");
     }
 
+    public override void Unload(bool hotReload)
+    {
+        Log("===== CS2DemoBuddy v3.0.0 UNLOADING =====");
+
+        // Stop any active recording
+        if (IsRecording)
+        {
+            Server.ExecuteCommand("tv_stoprecord");
+            IsRecording = false;
+        }
+
+        // Dispose FileSystemWatcher
+        if (_watcher != null)
+        {
+            _watcher.EnableRaisingEvents = false;
+            _watcher.Dispose();
+            _watcher = null;
+        }
+
+        // Clear watcher state
+        lock (_watcherLock)
+        {
+            _watcherCreatedFiles.Clear();
+        }
+
+        CurrentDemoName = "";
+        HistoryTracker = null;
+
+        Log("===== CS2DemoBuddy v3.0.0 UNLOADED =====");
+    }
+
     private void SetupFileWatcher()
     {
         try
