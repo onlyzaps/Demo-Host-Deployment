@@ -144,6 +144,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private readonly HashSet<string> _pendingFiles = new();
     private readonly object _pendingLock = new();
     private CancellationTokenSource? _inventoryCts;
+    private string _gameDirectory = "";
 
     private void Log(string message)
     {
@@ -205,6 +206,9 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     public override void Load(bool hotReload)
     {
         Log("===== CS2DemoBuddy v3.1.0 LOADING =====");
+
+        // Cache game directory for background thread access
+        _gameDirectory = Server.GameDirectory;
 
         string configDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../configs/plugins/CS2DemoBuddy"));
         if (!Directory.Exists(configDir)) Directory.CreateDirectory(configDir);
@@ -672,8 +676,8 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private async Task ReportSourceFiles()
     {
         string[] scanDirs = new[] {
-            Path.Combine(Server.GameDirectory, "csgo"),
-            Server.GameDirectory,
+            Path.Combine(_gameDirectory, "csgo"),
+            _gameDirectory,
             Environment.CurrentDirectory
         }.Distinct().ToArray();
 
