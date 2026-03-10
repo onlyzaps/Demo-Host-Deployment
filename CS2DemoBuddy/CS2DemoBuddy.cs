@@ -202,11 +202,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         SetupFileWatcher();
 
         // CRITICAL: tv_delay 0 is required for tv_record to produce files
-        Server.ExecuteCommand("tv_enable 1");
-        Server.ExecuteCommand("tv_delay 0");
-        Server.ExecuteCommand("tv_snapshotrate 64");
-        Server.ExecuteCommand("tv_transmitall 1");
-        Server.ExecuteCommand("tv_relayvoice 1");
+        ApplyGotvSettings("Load");
 
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
@@ -274,6 +270,29 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         HistoryTracker = null;
 
         Log("===== CS2DemoBuddy v3.0.0 UNLOADED =====");
+    }
+
+    private void ApplyGotvSettings(string context)
+    {
+        Log($"[{context}] Applying GOTV settings...");
+
+        // Core GOTV enable + recording requirements
+        Server.ExecuteCommand("tv_enable 1");
+        Server.ExecuteCommand("tv_delay 0");           // CRITICAL: without this, tv_record produces empty files
+
+        // Full data capture settings
+        Server.ExecuteCommand("tv_transmitall 1");      // Transmit ALL entity updates to GOTV relay
+        Server.ExecuteCommand("tv_relayvoice 1");       // Include voice in recording
+
+        // Quality / rate settings — remove any throttling
+        Server.ExecuteCommand("tv_snapshotrate 64");    // Match server tickrate
+        Server.ExecuteCommand("tv_maxrate 0");          // No rate limit on GOTV stream
+        Server.ExecuteCommand("tv_deltacache -1");      // Unlimited delta cache (was in v2.1.0)
+
+        // Autorecord off — we manage recording ourselves
+        Server.ExecuteCommand("tv_autorecord 0");
+
+        Log($"[{context}] GOTV settings applied: tv_enable 1, tv_delay 0, tv_transmitall 1, tv_relayvoice 1, tv_snapshotrate 64, tv_maxrate 0, tv_deltacache -1");
     }
 
     private void SetupFileWatcher()
@@ -355,12 +374,30 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         HistoryTracker?.AddDemo(demoFileName, Config.ServerName);
 
+        // Clear any stuck recording state
+        Server.ExecuteCommand("tv_stoprecord");
+
+        // CRITICAL: Must re-apply GOTV settings immediately before tv_record.
+        ApplyGotvSettings("PreRecord");
+
         // Clear watcher list for this recording session
         lock (_watcherLock) { _watcherCreatedFiles.Clear(); }
 
-        Server.ExecuteCommand($"tv_record {CurrentDemoName}");
+        // Use NextFrame to ensure all cvars have been processed before tv_record
+        Server.NextFrame(() =>
+        {
+            Server.ExecuteCommand($"tv_record {CurrentDemoName}");
+            Log($"Started recording: {demoFileName}");
+
+            // Log GOTV status after recording starts
+            AddTimer(3.0f, () =>
+            {
+                Server.ExecuteCommand("tv_status");
+                Log("tv_status requested — check server console for GOTV relay details.");
+            });
+        });
+
         IsRecording = true;
-        Log($"Started recording: {demoFileName}");
     }
 
     private void OnMapStart(string mapName)
@@ -370,10 +407,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         _lastStopTime = DateTime.MinValue; // Reset stop cooldown on new map
         Log($"Map started: {mapName} (recording cooldown {MapCooldownSeconds}s)");
 
-        Server.ExecuteCommand("tv_enable 1");
-        Server.ExecuteCommand("tv_delay 0");
-        Server.ExecuteCommand("tv_transmitall 1");
-        Server.ExecuteCommand("tv_relayvoice 1");
+        ApplyGotvSettings("MapStart");
     }
 
     private void OnMapEnd()

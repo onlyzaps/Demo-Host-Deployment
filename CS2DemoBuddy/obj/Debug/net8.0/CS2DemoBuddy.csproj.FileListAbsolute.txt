@@ -1,0 +1,12 @@
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\bin\Debug\net8.0\CS2DemoBuddy.deps.json
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\bin\Debug\net8.0\CS2DemoBuddy.dll
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\bin\Debug\net8.0\CS2DemoBuddy.pdb
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\obj\Debug\net8.0\CS2DemoBuddy.csproj.AssemblyReference.cache
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\obj\Debug\net8.0\CS2DemoBuddy.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\obj\Debug\net8.0\CS2DemoBuddy.AssemblyInfoInputs.cache
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\obj\Debug\net8.0\CS2DemoBuddy.AssemblyInfo.cs
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\obj\Debug\net8.0\CS2DemoBuddy.csproj.CoreCompileInputs.cache
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\obj\Debug\net8.0\CS2DemoBuddy.dll
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\obj\Debug\net8.0\refint\CS2DemoBuddy.dll
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\obj\Debug\net8.0\CS2DemoBuddy.pdb
+C:\Users\vindict6\Desktop\CS2DemoBuddy\CS2DemoBuddy\obj\Debug\net8.0\ref\CS2DemoBuddy.dll
