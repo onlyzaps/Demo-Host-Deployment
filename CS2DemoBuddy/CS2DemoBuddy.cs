@@ -122,7 +122,7 @@ public class DemoHistoryTracker
 public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 {
     public override string ModuleName => "CS2DemoBuddy";
-    public override string ModuleVersion => "3.2.0";
+    public override string ModuleVersion => "3.3.0";
     public override string ModuleAuthor => "VinSix";
 
     public CS2DemoBuddyConfig Config { get; set; } = new();
@@ -135,6 +135,8 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private bool IsRecording = false;
     private string _matchFolder = "";
     private string _matchDate = "";
+    private bool _matchEstablished = false;
+    private int _roundNumber = 0;
     private const long MinDemoSizeBytes = 1_000_000; // 1MB — skip junk demos
 
     private FileSystemWatcher? _watcher;
@@ -204,7 +206,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     public override void Load(bool hotReload)
     {
-        Log("===== CS2DemoBuddy v3.2.0 LOADING =====");
+        Log("===== CS2DemoBuddy v3.3.0 LOADING =====");
 
         // Cache game directory for background thread access
         _gameDirectory = Server.GameDirectory;
@@ -224,43 +226,66 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
 
-        // Per-match recording: start recording on the first non-warmup round
+        // Per-round recording: each round gets its own demo file
         RegisterEventHandler<EventRoundStart>((@event, info) =>
         {
-            if (!IsRecording)
+            try
             {
-                try
+                if (IsWarmup())
                 {
-                    if (IsWarmup())
-                    {
-                        Log("RoundStart during warmup — skipping recording.");
-                        return HookResult.Continue;
-                    }
+                    Log("RoundStart during warmup — skipping recording.");
+                    return HookResult.Continue;
+                }
 
-                    var players = Utilities.GetPlayers();
-                    int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
-                    if (humanCount > 0)
-                    {
-                        Log($"RoundStart with {humanCount} human(s). Starting match recording...");
-                        StartRecording();
-                    }
-                }
-                catch (Exception ex)
+                var players = Utilities.GetPlayers();
+                int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
+                if (humanCount == 0)
                 {
-                    Log($"RoundStart handler error: {ex.Message}");
+                    Log("RoundStart with 0 humans — skipping.");
+                    return HookResult.Continue;
                 }
+
+                // Establish match context once per map session
+                if (!_matchEstablished)
+                {
+                    string mapName = Server.MapName;
+                    string matchTimestamp = DateTime.UtcNow.ToString("HHmmss");
+                    _matchFolder = $"{mapName}-{matchTimestamp}";
+                    _matchDate = DateTime.UtcNow.ToString("yyyy-MM-dd");
+                    _matchEstablished = true;
+                    _roundNumber = 0;
+                    Log($"Match established: {_matchFolder}");
+                }
+
+                _roundNumber++;
+                Log($"RoundStart #{_roundNumber} with {humanCount} human(s). Starting round recording...");
+                StartRecording();
+            }
+            catch (Exception ex)
+            {
+                Log($"RoundStart handler error: {ex.Message}");
             }
             return HookResult.Continue;
         });
 
-        // No RoundEnd handler — we record continuously until map ends
+        // Per-round: stop recording at round end and upload
+        RegisterEventHandler<EventRoundEnd>((@event, info) =>
+        {
+            if (IsRecording)
+            {
+                Log($"RoundEnd — stopping round {_roundNumber} recording.");
+                StopAndUploadDemo();
+            }
+            return HookResult.Continue;
+        });
 
-        // Safety net: log match end (recording continues until OnMapEnd)
+        // Safety net: stop recording if match ends mid-round
         RegisterEventHandler<EventCsWinPanelMatch>((@event, info) =>
         {
             if (IsRecording)
             {
-                Log("CsWinPanelMatch — match ended, recording continues until map change.");
+                Log("CsWinPanelMatch — stopping final round recording.");
+                StopAndUploadDemo();
             }
             return HookResult.Continue;
         });
@@ -271,12 +296,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         _inventoryCts = new CancellationTokenSource();
         _ = RunInventoryLoop(_inventoryCts.Token);
 
-        Log("===== CS2DemoBuddy v3.2.0 LOADED =====");
+        Log("===== CS2DemoBuddy v3.3.0 LOADED =====");
     }
 
     public override void Unload(bool hotReload)
     {
-        Log("===== CS2DemoBuddy v3.2.0 UNLOADING =====");
+        Log("===== CS2DemoBuddy v3.3.0 UNLOADING =====");
 
         // Stop any active recording
         if (IsRecording)
@@ -310,7 +335,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         CurrentDemoName = "";
         HistoryTracker = null;
 
-        Log("===== CS2DemoBuddy v3.2.0 UNLOADED =====");
+        Log("===== CS2DemoBuddy v3.3.0 UNLOADED =====");
     }
 
     private void ApplyGotvSettings()
@@ -320,23 +345,31 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // Core GOTV enable + recording
         Server.ExecuteCommand("tv_enable 1");
 
-        // Give GOTV a small relay buffer — prevents data loss with 30+ players.
-        // 0 works for small servers but overwhelms the relay on busy ones.
-        Server.ExecuteCommand("tv_delay 10");
+        // No relay delay — engine writes demo data directly
+        Server.ExecuteCommand("tv_delay 0");
 
-        // Full data capture settings
-        Server.ExecuteCommand("tv_transmitall 1");      // Transmit ALL entity updates to GOTV relay
+        // Full POV recording: transmit all player entity data so viewers
+        // can switch between any player's perspective in the demo.
+        // Combined with tv_record_immediate 1, this produces usable demos
+        // even with high player counts (tested up to 64 players).
+        Server.ExecuteCommand("tv_transmitall 1");
+
+        // Force immediate file writing — critical for per-round recording.
+        // Without this, the engine may not flush demo data until map change,
+        // producing empty/tiny files on tv_stoprecord mid-match.
+        Server.ExecuteCommand("tv_record_immediate 1");
+
         Server.ExecuteCommand("tv_relayvoice 1");       // Include voice in recording
 
         // Quality / rate settings tuned for high player counts
-        Server.ExecuteCommand("tv_snapshotrate 32");    // Balance between quality and throughput
+        Server.ExecuteCommand("tv_snapshotrate 20");    // Lower rate to handle 64-player entity load
         Server.ExecuteCommand("tv_maxrate 0");          // No rate limit on GOTV stream
         Server.ExecuteCommand("tv_deltacache -1");      // Unlimited delta cache
 
         // Autorecord off — we manage recording ourselves
         Server.ExecuteCommand("tv_autorecord 0");
 
-        Log("GOTV settings applied: tv_enable 1, tv_delay 10, tv_transmitall 1, tv_relayvoice 1, tv_snapshotrate 32, tv_maxrate 0, tv_deltacache -1");
+        Log("GOTV settings applied: tv_enable 1, tv_delay 0, tv_transmitall 1, tv_record_immediate 1, tv_snapshotrate 20, tv_maxrate 0, tv_deltacache -1");
     }
 
     private void SetupFileWatcher()
@@ -383,11 +416,9 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         if (IsRecording) return;
 
         string mapName = Server.MapName;
-        string matchTimestamp = DateTime.UtcNow.ToString("HHmmss");
-        _matchFolder = $"{mapName}-{matchTimestamp}";
-        _matchDate = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        string roundTimestamp = DateTime.UtcNow.ToString("HHmmss");
 
-        CurrentDemoName = $"{mapName}_{matchTimestamp}";
+        CurrentDemoName = $"{mapName}_round{_roundNumber}_{roundTimestamp}";
         string demoFileName = $"{CurrentDemoName}.dem";
 
         HistoryTracker?.AddDemo(demoFileName, StorageServerName, _matchFolder, _matchDate);
@@ -398,7 +429,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         Server.NextFrame(() =>
         {
             Server.ExecuteCommand($"tv_record {CurrentDemoName}");
-            Log($"Started recording: {demoFileName} (Match: {_matchFolder})");
+            Log($"Started recording: {demoFileName} (Match: {_matchFolder}, Round: {_roundNumber})");
         });
 
         IsRecording = true;
@@ -409,12 +440,20 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         IsRecording = false;
         _matchFolder = "";
         _matchDate = "";
+        _matchEstablished = false;
+        _roundNumber = 0;
         Log($"Map started: {mapName}");
     }
 
     private void OnMapEnd()
     {
-        StopAndUploadDemo();
+        if (IsRecording)
+        {
+            Log("MapEnd — stopping final round recording.");
+            StopAndUploadDemo();
+        }
+        _matchEstablished = false;
+        _roundNumber = 0;
     }
 
     private void StopAndUploadDemo()
@@ -441,25 +480,25 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         Task.Run(async () =>
         {
-            // Wait for engine to finalize the demo file after tv_stoprecord.
-            // With 30+ players, the engine needs more time to flush.
-            await Task.Delay(45000);
+            // With tv_record_immediate 1, the file should be available quickly
+            // after tv_stoprecord. Short initial wait then retry.
+            await Task.Delay(10000);
 
             string? foundPath = FindDemoFile(stoppedDemoName, gameDir, watcherSnapshot);
 
-            // Second attempt after longer wait
+            // Second attempt after moderate wait
             if (foundPath == null)
             {
-                Log($"First search for {stoppedDemoName} failed, waiting 45s more...");
-                await Task.Delay(45000);
+                Log($"First search for {stoppedDemoName} failed, waiting 15s more...");
+                await Task.Delay(15000);
                 foundPath = FindDemoFile(stoppedDemoName, gameDir, null);
             }
 
-            // Third attempt — the file may appear on map change
+            // Third attempt — longer wait as fallback
             if (foundPath == null)
             {
-                Log($"Second search for {stoppedDemoName} failed, waiting 90s more...");
-                await Task.Delay(90000);
+                Log($"Second search for {stoppedDemoName} failed, waiting 30s more...");
+                await Task.Delay(30000);
                 foundPath = FindDemoFile(stoppedDemoName, gameDir, null);
             }
 
