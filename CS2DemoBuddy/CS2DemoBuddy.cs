@@ -116,7 +116,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 {
     public override string ModuleName => "CS2DemoBuddy";
     public override string ModuleVersion => "3.0.0";
-    public override string ModuleAuthor => "GitHub Copilot";
+    public override string ModuleAuthor => "VinSix";
 
     public CS2DemoBuddyConfig Config { get; set; } = new();
     private DemoHistoryTracker? HistoryTracker;
