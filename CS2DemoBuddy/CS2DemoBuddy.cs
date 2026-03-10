@@ -124,6 +124,9 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private string CurrentDemoName = "";
     private bool IsRecording = false;
+    private DateTime _mapStartTime = DateTime.MinValue;
+    private const int MapCooldownSeconds = 30;
+    private const long MinDemoSizeBytes = 1_000_000; // 1MB — skip junk demos
 
     private FileSystemWatcher? _watcher;
     private List<string> _watcherCreatedFiles = new();
@@ -298,9 +301,15 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         }
     }
 
+    private bool IsMapReady()
+    {
+        return (DateTime.UtcNow - _mapStartTime).TotalSeconds >= MapCooldownSeconds;
+    }
+
     private void PlayerCheckLoop()
     {
         if (IsRecording) return;
+        if (!IsMapReady()) return;
 
         try
         {
@@ -321,6 +330,11 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private void StartRecording()
     {
         if (IsRecording) return;
+        if (!IsMapReady())
+        {
+            Log($"Skipping recording — map only loaded {(DateTime.UtcNow - _mapStartTime).TotalSeconds:F0}s ago (need {MapCooldownSeconds}s).");
+            return;
+        }
 
         string timestamp = DateTime.UtcNow.ToString("MMddyy_HHmmss");
         string mapName = Server.MapName;
@@ -349,7 +363,8 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private void OnMapStart(string mapName)
     {
         IsRecording = false;
-        Log($"Map started: {mapName}");
+        _mapStartTime = DateTime.UtcNow;
+        Log($"Map started: {mapName} (recording cooldown {MapCooldownSeconds}s)");
 
         Server.ExecuteCommand("tv_enable 1");
         Server.ExecuteCommand("tv_delay 0");
@@ -416,6 +431,19 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 Log($"Found {filesToUpload.Count} demo(s) to upload.");
                 foreach (var filePath in filesToUpload)
                 {
+                    try
+                    {
+                        var fileSize = new FileInfo(filePath).Length;
+                        if (fileSize < MinDemoSizeBytes)
+                        {
+                            Log($"Skipping {Path.GetFileName(filePath)} — too small ({fileSize / 1024}KB). Deleting junk demo.");
+                            try { File.Delete(filePath); } catch { }
+                            HistoryTracker?.RemoveDemo(Path.GetFileName(filePath));
+                            continue;
+                        }
+                    }
+                    catch { continue; }
+
                     string fileName = Path.GetFileName(filePath);
                     await Task.Delay(1000);
                     UploadAndDeleteDemoRoutine(filePath, fileName);
