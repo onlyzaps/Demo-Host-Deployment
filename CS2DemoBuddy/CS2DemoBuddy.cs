@@ -125,7 +125,9 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private string CurrentDemoName = "";
     private bool IsRecording = false;
     private DateTime _mapStartTime = DateTime.MinValue;
+    private DateTime _lastStopTime = DateTime.MinValue;
     private const int MapCooldownSeconds = 30;
+    private const int StopCooldownSeconds = 60;
     private const long MinDemoSizeBytes = 1_000_000; // 1MB — skip junk demos
 
     private FileSystemWatcher? _watcher;
@@ -202,7 +204,6 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // CRITICAL: tv_delay 0 is required for tv_record to produce files
         Server.ExecuteCommand("tv_enable 1");
         Server.ExecuteCommand("tv_delay 0");
-        Server.ExecuteCommand("tv_deltacache -1");
         Server.ExecuteCommand("tv_snapshotrate 64");
         Server.ExecuteCommand("tv_transmitall 1");
         Server.ExecuteCommand("tv_relayvoice 1");
@@ -306,10 +307,16 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         return (DateTime.UtcNow - _mapStartTime).TotalSeconds >= MapCooldownSeconds;
     }
 
+    private bool IsStopCooldownOver()
+    {
+        return (DateTime.UtcNow - _lastStopTime).TotalSeconds >= StopCooldownSeconds;
+    }
+
     private void PlayerCheckLoop()
     {
         if (IsRecording) return;
         if (!IsMapReady()) return;
+        if (!IsStopCooldownOver()) return;
 
         try
         {
@@ -335,6 +342,11 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             Log($"Skipping recording — map only loaded {(DateTime.UtcNow - _mapStartTime).TotalSeconds:F0}s ago (need {MapCooldownSeconds}s).");
             return;
         }
+        if (!IsStopCooldownOver())
+        {
+            Log($"Skipping recording — only {(DateTime.UtcNow - _lastStopTime).TotalSeconds:F0}s since last stop (need {StopCooldownSeconds}s).");
+            return;
+        }
 
         string timestamp = DateTime.UtcNow.ToString("MMddyy_HHmmss");
         string mapName = Server.MapName;
@@ -342,15 +354,6 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         string demoFileName = $"{CurrentDemoName}.dem";
 
         HistoryTracker?.AddDemo(demoFileName, Config.ServerName);
-
-        // Clear any stuck recording state
-        Server.ExecuteCommand("tv_stoprecord");
-
-        // Force GOTV settings (tv_delay 0 is the critical one)
-        Server.ExecuteCommand("tv_enable 1");
-        Server.ExecuteCommand("tv_delay 0");
-        Server.ExecuteCommand("tv_transmitall 1");
-        Server.ExecuteCommand("tv_relayvoice 1");
 
         // Clear watcher list for this recording session
         lock (_watcherLock) { _watcherCreatedFiles.Clear(); }
@@ -364,6 +367,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     {
         IsRecording = false;
         _mapStartTime = DateTime.UtcNow;
+        _lastStopTime = DateTime.MinValue; // Reset stop cooldown on new map
         Log($"Map started: {mapName} (recording cooldown {MapCooldownSeconds}s)");
 
         Server.ExecuteCommand("tv_enable 1");
@@ -383,6 +387,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         Server.ExecuteCommand("tv_stoprecord");
         IsRecording = false;
+        _lastStopTime = DateTime.UtcNow;
 
         string demoFileName = $"{CurrentDemoName}.dem";
         Log($"Stopped recording: {demoFileName}");
