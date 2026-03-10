@@ -45,7 +45,7 @@ public class DemoHistoryTracker
         }
     }
 
-    public void AddDemo(string fileName, string serverName)
+    public void AddDemo(string fileName, string serverName, string matchFolder, string matchDate)
     {
         lock (_lock)
         {
@@ -59,7 +59,9 @@ public class DemoHistoryTracker
                 {
                     root.Add(new XElement("Demo",
                         new XAttribute("FileName", fileName),
-                        new XAttribute("ServerName", serverName)));
+                        new XAttribute("ServerName", serverName),
+                        new XAttribute("MatchFolder", matchFolder),
+                        new XAttribute("MatchDate", matchDate)));
                     doc.Save(_xmlFilePath);
                 }
             }
@@ -92,21 +94,26 @@ public class DemoHistoryTracker
         }
     }
 
-    public string? GetTargetServerName(string fileName)
+    public (string? serverName, string? matchFolder, string? matchDate) GetDemoInfo(string fileName)
     {
         lock (_lock)
         {
             try
             {
-                if (!File.Exists(_xmlFilePath)) return null;
+                if (!File.Exists(_xmlFilePath)) return (null, null, null);
                 var doc = XDocument.Load(_xmlFilePath);
                 var el = doc.Element("DemoHistory")?.Elements("Demo").FirstOrDefault(e => e.Attribute("FileName")?.Value == fileName);
-                return el?.Attribute("ServerName")?.Value;
+                if (el == null) return (null, null, null);
+                return (
+                    el.Attribute("ServerName")?.Value,
+                    el.Attribute("MatchFolder")?.Value,
+                    el.Attribute("MatchDate")?.Value
+                );
             }
             catch (Exception ex)
             {
-                _logger($"XML Tracker Error (Get): {ex.Message}");
-                return null;
+                _logger($"XML Tracker Error (GetInfo): {ex.Message}");
+                return (null, null, null);
             }
         }
     }
@@ -115,7 +122,7 @@ public class DemoHistoryTracker
 public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 {
     public override string ModuleName => "CS2DemoBuddy";
-    public override string ModuleVersion => "3.0.0";
+    public override string ModuleVersion => "3.1.0";
     public override string ModuleAuthor => "VinSix";
 
     public CS2DemoBuddyConfig Config { get; set; } = new();
@@ -124,10 +131,9 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private string CurrentDemoName = "";
     private bool IsRecording = false;
-    private DateTime _mapStartTime = DateTime.MinValue;
-    private DateTime _lastStopTime = DateTime.MinValue;
-    private const int MapCooldownSeconds = 30;
-    private const int StopCooldownSeconds = 60;
+    private int _roundNumber = 0;
+    private string _matchFolder = "";
+    private string _matchDate = "";
     private const long MinDemoSizeBytes = 1_000_000; // 1MB — skip junk demos
 
     private FileSystemWatcher? _watcher;
@@ -193,7 +199,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     public override void Load(bool hotReload)
     {
-        Log("===== CS2DemoBuddy v3.0.0 LOADING =====");
+        Log("===== CS2DemoBuddy v3.1.0 LOADING =====");
 
         string configDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../configs/plugins/CS2DemoBuddy"));
         if (!Directory.Exists(configDir)) Directory.CreateDirectory(configDir);
@@ -201,18 +207,28 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         SetupFileWatcher();
 
-        // CRITICAL: tv_delay 0 is required for tv_record to produce files
-        ApplyGotvSettings("Load");
+        // Clear any stuck recording from a previous session or crash
+        Server.ExecuteCommand("tv_stoprecord");
+
+        // Apply GOTV settings once at load — not per-round or per-map
+        ApplyGotvSettings();
 
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
 
+        // Per-round recording: start a new demo each round
         RegisterEventHandler<EventRoundStart>((@event, info) =>
         {
             if (!IsRecording)
             {
                 try
                 {
+                    if (IsWarmup())
+                    {
+                        Log("RoundStart during warmup — skipping recording.");
+                        return HookResult.Continue;
+                    }
+
                     var players = Utilities.GetPlayers();
                     int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
                     if (humanCount > 0)
@@ -229,21 +245,36 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             return HookResult.Continue;
         });
 
-        RegisterEventHandler<EventCsWinPanelMatch>((@event, info) =>
+        // Per-round recording: stop and upload at end of each round
+        RegisterEventHandler<EventRoundEnd>((@event, info) =>
         {
-            StopAndUploadDemo();
+            if (IsRecording)
+            {
+                Log("RoundEnd — stopping recording for this round.");
+                StopAndUploadDemo();
+            }
             return HookResult.Continue;
         });
 
-        AddTimer(15.0f, PlayerCheckLoop, TimerFlags.REPEAT);
+        // Safety net: stop recording on match end if RoundEnd didn't fire
+        RegisterEventHandler<EventCsWinPanelMatch>((@event, info) =>
+        {
+            if (IsRecording)
+            {
+                Log("CsWinPanelMatch — stopping recording.");
+                StopAndUploadDemo();
+            }
+            return HookResult.Continue;
+        });
+
         AddTimer(3600.0f, RunGarbageCollection, TimerFlags.REPEAT);
 
-        Log("===== CS2DemoBuddy v3.0.0 LOADED =====");
+        Log("===== CS2DemoBuddy v3.1.0 LOADED =====");
     }
 
     public override void Unload(bool hotReload)
     {
-        Log("===== CS2DemoBuddy v3.0.0 UNLOADING =====");
+        Log("===== CS2DemoBuddy v3.1.0 UNLOADING =====");
 
         // Stop any active recording
         if (IsRecording)
@@ -269,12 +300,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         CurrentDemoName = "";
         HistoryTracker = null;
 
-        Log("===== CS2DemoBuddy v3.0.0 UNLOADED =====");
+        Log("===== CS2DemoBuddy v3.1.0 UNLOADED =====");
     }
 
-    private void ApplyGotvSettings(string context)
+    private void ApplyGotvSettings()
     {
-        Log($"[{context}] Applying GOTV settings...");
+        Log("Applying GOTV settings (one-time at load)...");
 
         // Core GOTV enable + recording requirements
         Server.ExecuteCommand("tv_enable 1");
@@ -292,7 +323,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // Autorecord off — we manage recording ourselves
         Server.ExecuteCommand("tv_autorecord 0");
 
-        Log($"[{context}] GOTV settings applied: tv_enable 1, tv_delay 0, tv_transmitall 1, tv_relayvoice 1, tv_snapshotrate 64, tv_maxrate 0, tv_deltacache -1");
+        Log("GOTV settings applied: tv_enable 1, tv_delay 0, tv_transmitall 1, tv_relayvoice 1, tv_snapshotrate 64, tv_maxrate 0, tv_deltacache -1");
     }
 
     private void SetupFileWatcher()
@@ -321,80 +352,46 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         }
     }
 
-    private bool IsMapReady()
+    private bool IsWarmup()
     {
-        return (DateTime.UtcNow - _mapStartTime).TotalSeconds >= MapCooldownSeconds;
-    }
-
-    private bool IsStopCooldownOver()
-    {
-        return (DateTime.UtcNow - _lastStopTime).TotalSeconds >= StopCooldownSeconds;
-    }
-
-    private void PlayerCheckLoop()
-    {
-        if (IsRecording) return;
-        if (!IsMapReady()) return;
-        if (!IsStopCooldownOver()) return;
-
         try
         {
-            var players = Utilities.GetPlayers();
-            int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
-
-            if (humanCount > 0)
-            {
-                StartRecording();
-            }
+            var rules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").FirstOrDefault()?.GameRules;
+            return rules?.WarmupPeriod ?? false;
         }
-        catch (Exception ex)
+        catch
         {
-            Log($"PlayerCheckLoop error: {ex.Message}");
+            return false;
         }
     }
 
     private void StartRecording()
     {
         if (IsRecording) return;
-        if (!IsMapReady())
+
+        _roundNumber++;
+        string mapName = Server.MapName;
+
+        if (_roundNumber == 1)
         {
-            Log($"Skipping recording — map only loaded {(DateTime.UtcNow - _mapStartTime).TotalSeconds:F0}s ago (need {MapCooldownSeconds}s).");
-            return;
-        }
-        if (!IsStopCooldownOver())
-        {
-            Log($"Skipping recording — only {(DateTime.UtcNow - _lastStopTime).TotalSeconds:F0}s since last stop (need {StopCooldownSeconds}s).");
-            return;
+            string matchTimestamp = DateTime.UtcNow.ToString("HHmmss");
+            _matchFolder = $"{mapName}-{matchTimestamp}";
+            _matchDate = DateTime.UtcNow.ToString("yyyy-MM-dd");
         }
 
-        string timestamp = DateTime.UtcNow.ToString("MMddyy_HHmmss");
-        string mapName = Server.MapName;
-        CurrentDemoName = $"{mapName}_{timestamp}";
+        string roundTimestamp = DateTime.UtcNow.ToString("HHmmss");
+        CurrentDemoName = $"{mapName}_round_{_roundNumber}_{roundTimestamp}";
         string demoFileName = $"{CurrentDemoName}.dem";
 
-        HistoryTracker?.AddDemo(demoFileName, Config.ServerName);
-
-        // Clear any stuck recording state
-        Server.ExecuteCommand("tv_stoprecord");
-
-        // CRITICAL: Must re-apply GOTV settings immediately before tv_record.
-        ApplyGotvSettings("PreRecord");
+        HistoryTracker?.AddDemo(demoFileName, Config.ServerName, _matchFolder, _matchDate);
 
         // Clear watcher list for this recording session
         lock (_watcherLock) { _watcherCreatedFiles.Clear(); }
 
-        // Use NextFrame to ensure all cvars have been processed before tv_record
         Server.NextFrame(() =>
         {
             Server.ExecuteCommand($"tv_record {CurrentDemoName}");
-            Log($"Started recording: {demoFileName}");
-
-            // Log GOTV status after recording starts
-            AddTimer(3.0f, () =>
-            {
-                Server.ExecuteCommand("tv_status");
-                Log("tv_status requested — check server console for GOTV relay details.");
-            });
+            Log($"Started recording: {demoFileName} (Match: {_matchFolder}, Round: {_roundNumber})");
         });
 
         IsRecording = true;
@@ -403,11 +400,10 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private void OnMapStart(string mapName)
     {
         IsRecording = false;
-        _mapStartTime = DateTime.UtcNow;
-        _lastStopTime = DateTime.MinValue; // Reset stop cooldown on new map
-        Log($"Map started: {mapName} (recording cooldown {MapCooldownSeconds}s)");
-
-        ApplyGotvSettings("MapStart");
+        _roundNumber = 0;
+        _matchFolder = "";
+        _matchDate = "";
+        Log($"Map started: {mapName}");
     }
 
     private void OnMapEnd()
@@ -421,9 +417,10 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         Server.ExecuteCommand("tv_stoprecord");
         IsRecording = false;
-        _lastStopTime = DateTime.UtcNow;
 
         string demoFileName = $"{CurrentDemoName}.dem";
+        string stoppedMatchFolder = _matchFolder;
+        string stoppedMatchDate = _matchDate;
         Log($"Stopped recording: {demoFileName}");
 
         // Snapshot watcher results at stop time (before a new recording can start)
@@ -516,7 +513,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             }
 
             Log($"Demo ready: {stoppedDemoName} ({finalSize / (1024 * 1024.0):F1}MB)");
-            UploadAndDeleteDemoRoutine(foundPath, stoppedDemoName);
+            UploadAndDeleteDemoRoutine(foundPath, stoppedDemoName, null, stoppedMatchFolder, stoppedMatchDate);
         });
     }
 
@@ -586,7 +583,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                     string fileName = Path.GetFileName(filePath);
                     if (IsRecording && fileName == $"{CurrentDemoName}.dem") continue;
 
-                    string? targetServer = HistoryTracker?.GetTargetServerName(fileName);
+                    var (targetServer, gcMatchFolder, gcMatchDate) = HistoryTracker?.GetDemoInfo(fileName) ?? (null, null, null);
                     if (targetServer == null)
                     {
                         Log($"GC: Deleting untracked {fileName}");
@@ -595,7 +592,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                     else
                     {
                         Log($"GC: Retrying upload for {fileName}");
-                        UploadAndDeleteDemoRoutine(filePath, fileName, targetServer);
+                        UploadAndDeleteDemoRoutine(filePath, fileName, targetServer, gcMatchFolder, gcMatchDate);
                     }
                 }
             }
@@ -603,7 +600,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         }
     }
 
-    private async void UploadAndDeleteDemoRoutine(string filePath, string fileName, string? serverNameFallback = null)
+    private async void UploadAndDeleteDemoRoutine(string filePath, string fileName, string? serverNameFallback = null, string? matchFolder = null, string? matchDate = null)
     {
         if (!File.Exists(filePath)) return;
 
@@ -619,6 +616,8 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             using var streamContent = new StreamContent(fileStream);
 
             form.Add(new StringContent(targetServerName), "serverName");
+            form.Add(new StringContent(matchFolder ?? ""), "matchFolder");
+            form.Add(new StringContent(matchDate ?? DateTime.UtcNow.ToString("yyyy-MM-dd")), "matchDate");
             streamContent.Headers.ContentType = MediaTypeHeaderValue.Parse("application/octet-stream");
             form.Add(streamContent, "demo", fileName);
 

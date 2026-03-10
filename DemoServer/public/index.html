@@ -151,6 +151,16 @@
     .download-btn { display: inline-block; padding: 8px 16px; background-color: var(--accent-color); color: #000; text-decoration: none; font-weight: 600; font-size: 13px; border-radius: 4px; transition: all 0.2s; }
     .download-btn:hover { background-color: #fff; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0, 191, 255, 0.2); }
 
+    .match-row { cursor: pointer; transition: background-color 0.2s; }
+    .match-row:hover td { background-color: rgba(0, 191, 255, 0.05) !important; }
+    .expand-cell { width: 40px; text-align: center; user-select: none; }
+    .expand-icon { display: inline-block; font-size: 10px; color: var(--accent-color); transition: transform 0.2s; }
+    .expand-icon.expanded { transform: rotate(90deg); }
+    .round-row { background-color: rgba(0, 0, 0, 0.15); }
+    .round-row td:first-child { padding-left: 50px; }
+    .round-label { color: var(--accent-color); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .map-subtitle { font-size: 0.75rem; color: var(--text-secondary); font-weight: normal; margin-top: 2px; }
+
     .log-viewer { background: rgba(0, 0, 0, 0.6); color: #0f0; font-family: monospace; padding: 20px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-x: auto; height: 100%; border-radius: 4px; border: 1px solid var(--glass-border); }
 
     .site-footer { width: 100%; text-align: center; padding: 40px; color: var(--text-secondary); font-size: 13px; border-top: 1px solid var(--glass-border); background-color: var(--bg-dark); line-height: 1.6; margin-top: auto; }
@@ -328,10 +338,10 @@
         mainContent.innerHTML = '<div style="text-align:center; padding: 40px;">Loading matches...</div>';
 
         try {
-            const res = await fetch(`/api/servers/${encodeURIComponent(server)}/dates/${encodeURIComponent(date)}/demos`);
-            const demos = await res.json();
+            const res = await fetch(`/api/servers/${encodeURIComponent(server)}/dates/${encodeURIComponent(date)}/matches`);
+            const matches = await res.json();
             
-            if(demos.length === 0) {
+            if(matches.length === 0) {
                 mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:var(--text-secondary);">No match demos found for this date.</div>';
                 return;
             }
@@ -340,33 +350,147 @@
             <table class="demo-table">
                 <thead>
                     <tr>
-                        <th>Map / Name</th>
+                        <th style="width:40px;"></th>
+                        <th>Map / Match</th>
+                        <th>Rounds</th>
                         <th>Time Recorded</th>
-                        <th>File Size</th>
+                        <th>Total Size</th>
                         <th>Download</th>
                     </tr>
                 </thead>
                 <tbody>
             `;
-            demos.forEach(demo => {
-                let friendlyName = demo.name.replace('.dem', '');
-                let parts = friendlyName.split('_');
-                let displayMap = parts.length > 2 ? parts.slice(0, -2).join('_') : friendlyName;
 
+            matches.forEach((match, mi) => {
+                const matchId = 'match-' + mi;
+                let matchDisplay, matchTime;
+
+                if (match.matchFolder) {
+                    const parsed = parseMatchFolder(match.matchFolder);
+                    matchDisplay = formatMapDisplay(parsed.mapName);
+                    matchTime = formatUtcTime(parsed.time);
+                } else if (match.rounds.length > 0) {
+                    const parsed = parseRoundFilename(match.rounds[0].name);
+                    matchDisplay = formatMapDisplay(parsed.mapName);
+                    matchTime = new Date(match.date).toLocaleTimeString();
+                } else {
+                    matchDisplay = { full: 'Unknown', raw: '' };
+                    matchTime = '';
+                }
+
+                // Match header row (collapsed by default)
                 html += `
-                    <tr>
-                        <td style="font-weight:bold; color:#fff;">${escapeHtml(displayMap)} <div style="font-size:0.75rem; color:var(--text-secondary); font-weight:normal;">${escapeHtml(friendlyName)}</div></td>
-                        <td>${new Date(demo.date).toLocaleString()}</td>
-                        <td style="font-family:monospace;">${escapeHtml(demo.size)}</td>
-                        <td><a href="/demos/${encodeURI(demo.path)}" download class="download-btn">Download .dem</a></td>
+                    <tr class="match-row" onclick="toggleMatch('${matchId}')">
+                        <td class="expand-cell"><span class="expand-icon" id="icon-${matchId}">&#9654;</span></td>
+                        <td style="font-weight:bold; color:#fff;">${escapeHtml(matchDisplay.full)}<div class="map-subtitle">${escapeHtml(match.matchFolder || match.rounds[0]?.name || '')}</div></td>
+                        <td>${match.roundCount} round${match.roundCount !== 1 ? 's' : ''}</td>
+                        <td>${matchTime}</td>
+                        <td style="font-family:monospace;">${escapeHtml(match.totalSize)}</td>
+                        <td></td>
                     </tr>
                 `;
+
+                // Round rows (hidden by default)
+                match.rounds.forEach((round) => {
+                    const rParsed = parseRoundFilename(round.name);
+                    const roundLabel = rParsed.roundNum ? 'Round ' + rParsed.roundNum : round.name.replace('.dem','');
+                    const roundTime = rParsed.time ? formatUtcTime(rParsed.time) : new Date(round.date).toLocaleTimeString();
+
+                    html += `
+                        <tr class="round-row ${matchId}" style="display:none;">
+                            <td></td>
+                            <td><span class="round-label">${escapeHtml(roundLabel)}</span></td>
+                            <td></td>
+                            <td>${roundTime}</td>
+                            <td style="font-family:monospace;">${escapeHtml(round.size)}</td>
+                            <td><a href="/demos/${encodeURI(round.path)}" download class="download-btn">Download .dem</a></td>
+                        </tr>
+                    `;
+                });
             });
+
             html += `</tbody></table>`;
             mainContent.innerHTML = html;
         } catch(e) {
             mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:red;">Error loading demos. Internal server error.</div>';
         }
+    }
+
+    function toggleMatch(matchId) {
+        const rows = document.querySelectorAll('.' + matchId);
+        const icon = document.getElementById('icon-' + matchId);
+        const isHidden = rows.length > 0 && rows[0].style.display === 'none';
+
+        rows.forEach(row => {
+            row.style.display = isHidden ? '' : 'none';
+        });
+
+        if (icon) {
+            icon.classList.toggle('expanded', isHidden);
+        }
+    }
+
+    function parseMatchFolder(folder) {
+        // folder like "de_dust2-143025" or "cs_office-143025"
+        const lastDash = folder.lastIndexOf('-');
+        if (lastDash === -1) return { mapName: folder, time: '' };
+        return {
+            mapName: folder.substring(0, lastDash),
+            time: folder.substring(lastDash + 1)
+        };
+    }
+
+    function parseRoundFilename(filename) {
+        // filename like "de_dust2_round_3_143025.dem"
+        const clean = filename.replace('.dem', '');
+        const roundIdx = clean.indexOf('_round_');
+        if (roundIdx === -1) {
+            // Legacy format: mapname_MMddyy_HHmmss
+            let parts = clean.split('_');
+            let displayMap = parts.length > 2 ? parts.slice(0, -2).join('_') : clean;
+            return { mapName: displayMap, roundNum: null, time: '' };
+        }
+        const mapName = clean.substring(0, roundIdx);
+        const rest = clean.substring(roundIdx + 7); // after '_round_'
+        const underscoreIdx = rest.indexOf('_');
+        if (underscoreIdx === -1) {
+            return { mapName, roundNum: parseInt(rest) || null, time: '' };
+        }
+        return {
+            mapName,
+            roundNum: parseInt(rest.substring(0, underscoreIdx)) || null,
+            time: rest.substring(underscoreIdx + 1)
+        };
+    }
+
+    function formatMapDisplay(mapName) {
+        // "de_dust2" → "[DE] Dust 2", "cs_office" → "[CS] Office", "office" → "Office"
+        const prefixes = ['cs_', 'de_', 'ar_', 'gd_', 'dz_'];
+        let prefix = '';
+        let coreName = mapName;
+
+        for (const p of prefixes) {
+            if (mapName.startsWith(p)) {
+                prefix = p.replace('_', '').toUpperCase();
+                coreName = mapName.substring(p.length);
+                break;
+            }
+        }
+
+        let displayCore = coreName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+        return {
+            full: prefix ? '[' + prefix + '] ' + displayCore : displayCore,
+            raw: mapName
+        };
+    }
+
+    function formatUtcTime(timeStr) {
+        // "143025" → "14:30:25 UTC"
+        if (timeStr && timeStr.length === 6) {
+            return timeStr.substring(0,2) + ':' + timeStr.substring(2,4) + ':' + timeStr.substring(4,6) + ' UTC';
+        }
+        return timeStr || '';
     }
 
     // --- LOGS PORTION ---
@@ -453,9 +577,9 @@
 
             mainContent.innerHTML = `<div class="log-viewer">${escapeHtml(txt)}</div>`;
             
-            // Auto scroll to bottom of log
+            // Scroll to top of log (most recent entries are at top)
             const viewer = mainContent.querySelector('.log-viewer');
-            viewer.scrollTop = viewer.scrollHeight;
+            viewer.scrollTop = 0;
         } catch(e) {
             mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:red;">Error loading log content.</div>';
         }

@@ -14,13 +14,17 @@ app.use('/demos', express.static(storageDir));
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const serverName = req.body.serverName || '.Unknown_Server';
-    let cleanServerName = serverName.replace(/\s+/g, '_');
-    if (!cleanServerName.startsWith('.')) {
-        cleanServerName = '.' + cleanServerName;
+    const serverName = req.body.serverName || 'Unknown_Server';
+    const cleanServerName = serverName.replace(/[^a-zA-Z0-9_\-]/g, '_');
+    const matchFolder = (req.body.matchFolder || '').replace(/[^a-zA-Z0-9_\-]/g, '');
+    const matchDate = (req.body.matchDate || new Date().toISOString().split('T')[0]).replace(/[^0-9\-]/g, '');
+
+    let dir;
+    if (matchFolder) {
+      dir = path.join(storageDir, cleanServerName, matchDate, matchFolder);
+    } else {
+      dir = path.join(storageDir, cleanServerName, matchDate);
     }
-    const dateStr = new Date().toISOString().split('T')[0]; // UTC date folder (YYYY-MM-DD)
-    const dir = path.join(storageDir, cleanServerName, dateStr);
     if (!fs.existsSync(dir)){
         fs.mkdirSync(dir, { recursive: true });
     }
@@ -48,7 +52,7 @@ app.post('/upload', authenticateRequest, upload.single('demo'), (req, res) => {
   if (!req.file) {
     return res.status(400).send('No file uploaded.');
   }
-  console.log(`Received demo: ${req.file.originalname} for server ${req.body.serverName || 'Unknown_Server'}`);
+  console.log(`Received demo: ${req.file.originalname} for server ${req.body.serverName || 'Unknown_Server'}${req.body.matchFolder ? ` (match: ${req.body.matchFolder})` : ''}`);
   res.send('File uploaded successfully.');
 });
 
@@ -67,7 +71,11 @@ app.post('/upload-log', authenticateRequest, (req, res) => {
   }
   
   const logFile = path.join(logDir, `${dateStr}.log`);
-  fs.appendFileSync(logFile, logMsg);
+  let existing = '';
+  if (fs.existsSync(logFile)) {
+    existing = fs.readFileSync(logFile, 'utf8');
+  }
+  fs.writeFileSync(logFile, logMsg + existing);
   
   res.send('Log appended successfully.');
 });
@@ -76,7 +84,7 @@ app.post('/upload-log', authenticateRequest, (req, res) => {
 app.get('/api/servers', (req, res) => {
   if (!fs.existsSync(storageDir)) return res.json([]);
   try {
-    const servers = fs.readdirSync(storageDir).filter(f => f.startsWith('.') && f !== '.logs' && fs.statSync(path.join(storageDir, f)).isDirectory());
+    const servers = fs.readdirSync(storageDir).filter(f => f !== '.logs' && fs.statSync(path.join(storageDir, f)).isDirectory());
     res.json(servers);
   } catch (err) {
     res.status(500).send('Error reading storage directory.');
@@ -117,6 +125,70 @@ app.get('/api/servers/:server/dates/:date/demos', (req, res) => {
     res.json(allDemos.sort((a, b) => new Date(b.date) - new Date(a.date)));
   } catch (err) {
     res.status(500).send('Error reading demos.');
+  }
+});
+
+// Get all matches (with grouped rounds) for a given server and date
+app.get('/api/servers/:server/dates/:date/matches', (req, res) => {
+  const serverDir = req.params.server.replace(/[^a-zA-Z0-9_\-\.]/g, '');
+  const dateDir = req.params.date.replace(/[^0-9\-]/g, '');
+  const datePath = path.join(storageDir, serverDir, dateDir);
+  if (!fs.existsSync(datePath)) return res.json([]);
+
+  try {
+    const entries = fs.readdirSync(datePath);
+    let matches = [];
+
+    for (const entry of entries) {
+      const entryPath = path.join(datePath, entry);
+      const stat = fs.statSync(entryPath);
+
+      if (stat.isDirectory()) {
+        // Match folder containing round demos
+        const rounds = fs.readdirSync(entryPath)
+          .filter(f => f.endsWith('.dem'))
+          .map(f => {
+            const fStats = fs.statSync(path.join(entryPath, f));
+            return {
+              name: f,
+              path: `${serverDir}/${dateDir}/${entry}/${f}`,
+              size: (fStats.size / (1024 * 1024)).toFixed(2) + ' MB',
+              sizeBytes: fStats.size,
+              date: fStats.mtime
+            };
+          })
+          .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+        const totalBytes = rounds.reduce((sum, r) => sum + r.sizeBytes, 0);
+        matches.push({
+          matchFolder: entry,
+          rounds: rounds,
+          roundCount: rounds.length,
+          totalSize: (totalBytes / (1024 * 1024)).toFixed(2) + ' MB',
+          date: rounds.length > 0 ? rounds[0].date : stat.mtime
+        });
+      } else if (entry.endsWith('.dem')) {
+        // Legacy flat file — treat as single-round match
+        matches.push({
+          matchFolder: null,
+          rounds: [{
+            name: entry,
+            path: `${serverDir}/${dateDir}/${entry}`,
+            size: (stat.size / (1024 * 1024)).toFixed(2) + ' MB',
+            sizeBytes: stat.size,
+            date: stat.mtime
+          }],
+          roundCount: 1,
+          totalSize: (stat.size / (1024 * 1024)).toFixed(2) + ' MB',
+          date: stat.mtime
+        });
+      }
+    }
+
+    matches.sort((a, b) => new Date(b.date) - new Date(a.date));
+    res.json(matches);
+  } catch (err) {
+    res.status(500).send('Error reading matches.');
   }
 });
 
