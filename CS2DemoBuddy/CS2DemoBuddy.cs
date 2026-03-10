@@ -202,6 +202,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         Server.ExecuteCommand("tv_deltacache -1");
         Server.ExecuteCommand("tv_snapshotrate 64");
         Server.ExecuteCommand("tv_transmitall 1");
+        Server.ExecuteCommand("tv_relayvoice 1");
 
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
@@ -304,6 +305,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         Server.ExecuteCommand("tv_enable 1");
         Server.ExecuteCommand("tv_delay 0");
         Server.ExecuteCommand("tv_transmitall 1");
+        Server.ExecuteCommand("tv_relayvoice 1");
 
         // Clear watcher list for this recording session
         lock (_watcherLock) { _watcherCreatedFiles.Clear(); }
@@ -321,6 +323,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         Server.ExecuteCommand("tv_enable 1");
         Server.ExecuteCommand("tv_delay 0");
         Server.ExecuteCommand("tv_transmitall 1");
+        Server.ExecuteCommand("tv_relayvoice 1");
     }
 
     private void OnMapEnd()

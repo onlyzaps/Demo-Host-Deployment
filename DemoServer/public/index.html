@@ -350,8 +350,8 @@
             `;
             demos.forEach(demo => {
                 let friendlyName = demo.name.replace('.dem', '');
-                let mapParts = friendlyName.split('_');
-                let displayMap = mapParts.length > 0 ? mapParts[0] : friendlyName;
+                let parts = friendlyName.split('_');
+                let displayMap = parts.length > 2 ? parts.slice(0, -2).join('_') : friendlyName;
 
                 html += `
                     <tr>
