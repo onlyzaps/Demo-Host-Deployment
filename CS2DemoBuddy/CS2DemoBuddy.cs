@@ -122,7 +122,7 @@ public class DemoHistoryTracker
 public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 {
     public override string ModuleName => "CS2DemoBuddy";
-    public override string ModuleVersion => "3.1.0";
+    public override string ModuleVersion => "3.2.0";
     public override string ModuleAuthor => "VinSix";
 
     public CS2DemoBuddyConfig Config { get; set; } = new();
@@ -133,7 +133,6 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private string CurrentDemoName = "";
     private bool IsRecording = false;
-    private int _roundNumber = 0;
     private string _matchFolder = "";
     private string _matchDate = "";
     private const long MinDemoSizeBytes = 1_000_000; // 1MB — skip junk demos
@@ -205,7 +204,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     public override void Load(bool hotReload)
     {
-        Log("===== CS2DemoBuddy v3.1.0 LOADING =====");
+        Log("===== CS2DemoBuddy v3.2.0 LOADING =====");
 
         // Cache game directory for background thread access
         _gameDirectory = Server.GameDirectory;
@@ -225,7 +224,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
 
-        // Per-round recording: start a new demo each round
+        // Per-match recording: start recording on the first non-warmup round
         RegisterEventHandler<EventRoundStart>((@event, info) =>
         {
             if (!IsRecording)
@@ -242,7 +241,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                     int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
                     if (humanCount > 0)
                     {
-                        Log($"RoundStart with {humanCount} human(s). Starting recording...");
+                        Log($"RoundStart with {humanCount} human(s). Starting match recording...");
                         StartRecording();
                     }
                 }
@@ -254,24 +253,14 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             return HookResult.Continue;
         });
 
-        // Per-round recording: stop and upload at end of each round
-        RegisterEventHandler<EventRoundEnd>((@event, info) =>
-        {
-            if (IsRecording)
-            {
-                Log("RoundEnd — stopping recording for this round.");
-                StopAndUploadDemo();
-            }
-            return HookResult.Continue;
-        });
+        // No RoundEnd handler — we record continuously until map ends
 
-        // Safety net: stop recording on match end if RoundEnd didn't fire
+        // Safety net: log match end (recording continues until OnMapEnd)
         RegisterEventHandler<EventCsWinPanelMatch>((@event, info) =>
         {
             if (IsRecording)
             {
-                Log("CsWinPanelMatch — stopping recording.");
-                StopAndUploadDemo();
+                Log("CsWinPanelMatch — match ended, recording continues until map change.");
             }
             return HookResult.Continue;
         });
@@ -282,12 +271,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         _inventoryCts = new CancellationTokenSource();
         _ = RunInventoryLoop(_inventoryCts.Token);
 
-        Log("===== CS2DemoBuddy v3.1.0 LOADED =====");
+        Log("===== CS2DemoBuddy v3.2.0 LOADED =====");
     }
 
     public override void Unload(bool hotReload)
     {
-        Log("===== CS2DemoBuddy v3.1.0 UNLOADING =====");
+        Log("===== CS2DemoBuddy v3.2.0 UNLOADING =====");
 
         // Stop any active recording
         if (IsRecording)
@@ -321,30 +310,33 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         CurrentDemoName = "";
         HistoryTracker = null;
 
-        Log("===== CS2DemoBuddy v3.1.0 UNLOADED =====");
+        Log("===== CS2DemoBuddy v3.2.0 UNLOADED =====");
     }
 
     private void ApplyGotvSettings()
     {
         Log("Applying GOTV settings (one-time at load)...");
 
-        // Core GOTV enable + recording requirements
+        // Core GOTV enable + recording
         Server.ExecuteCommand("tv_enable 1");
-        Server.ExecuteCommand("tv_delay 0");           // CRITICAL: without this, tv_record produces empty files
+
+        // Give GOTV a small relay buffer — prevents data loss with 30+ players.
+        // 0 works for small servers but overwhelms the relay on busy ones.
+        Server.ExecuteCommand("tv_delay 10");
 
         // Full data capture settings
         Server.ExecuteCommand("tv_transmitall 1");      // Transmit ALL entity updates to GOTV relay
         Server.ExecuteCommand("tv_relayvoice 1");       // Include voice in recording
 
-        // Quality / rate settings — remove any throttling
-        Server.ExecuteCommand("tv_snapshotrate 64");    // Match server tickrate
+        // Quality / rate settings tuned for high player counts
+        Server.ExecuteCommand("tv_snapshotrate 32");    // Balance between quality and throughput
         Server.ExecuteCommand("tv_maxrate 0");          // No rate limit on GOTV stream
-        Server.ExecuteCommand("tv_deltacache -1");      // Unlimited delta cache (was in v2.1.0)
+        Server.ExecuteCommand("tv_deltacache -1");      // Unlimited delta cache
 
         // Autorecord off — we manage recording ourselves
         Server.ExecuteCommand("tv_autorecord 0");
 
-        Log("GOTV settings applied: tv_enable 1, tv_delay 0, tv_transmitall 1, tv_relayvoice 1, tv_snapshotrate 64, tv_maxrate 0, tv_deltacache -1");
+        Log("GOTV settings applied: tv_enable 1, tv_delay 10, tv_transmitall 1, tv_relayvoice 1, tv_snapshotrate 32, tv_maxrate 0, tv_deltacache -1");
     }
 
     private void SetupFileWatcher()
@@ -390,18 +382,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     {
         if (IsRecording) return;
 
-        _roundNumber++;
         string mapName = Server.MapName;
+        string matchTimestamp = DateTime.UtcNow.ToString("HHmmss");
+        _matchFolder = $"{mapName}-{matchTimestamp}";
+        _matchDate = DateTime.UtcNow.ToString("yyyy-MM-dd");
 
-        if (_roundNumber == 1)
-        {
-            string matchTimestamp = DateTime.UtcNow.ToString("HHmmss");
-            _matchFolder = $"{mapName}-{matchTimestamp}";
-            _matchDate = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        }
-
-        string roundTimestamp = DateTime.UtcNow.ToString("HHmmss");
-        CurrentDemoName = $"{mapName}_round_{_roundNumber}_{roundTimestamp}";
+        CurrentDemoName = $"{mapName}_{matchTimestamp}";
         string demoFileName = $"{CurrentDemoName}.dem";
 
         HistoryTracker?.AddDemo(demoFileName, StorageServerName, _matchFolder, _matchDate);
@@ -412,7 +398,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         Server.NextFrame(() =>
         {
             Server.ExecuteCommand($"tv_record {CurrentDemoName}");
-            Log($"Started recording: {demoFileName} (Match: {_matchFolder}, Round: {_roundNumber})");
+            Log($"Started recording: {demoFileName} (Match: {_matchFolder})");
         });
 
         IsRecording = true;
@@ -421,7 +407,6 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private void OnMapStart(string mapName)
     {
         IsRecording = false;
-        _roundNumber = 0;
         _matchFolder = "";
         _matchDate = "";
         Log($"Map started: {mapName}");
@@ -447,7 +432,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // Track this demo as pending so GC won't touch it
         lock (_pendingLock) { _pendingFiles.Add(demoFileName); }
 
-        // Snapshot watcher results at stop time (before a new recording can start)
+        // Snapshot watcher results at stop time
         List<string> watcherSnapshot;
         lock (_watcherLock) { watcherSnapshot = new List<string>(_watcherCreatedFiles); }
 
@@ -456,136 +441,32 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         Task.Run(async () =>
         {
-            // Wait 30s for engine to finalize the demo file after tv_stoprecord.
-            await Task.Delay(30000);
+            // Wait for engine to finalize the demo file after tv_stoprecord.
+            // With 30+ players, the engine needs more time to flush.
+            await Task.Delay(45000);
 
-            string? foundPath = null;
+            string? foundPath = FindDemoFile(stoppedDemoName, gameDir, watcherSnapshot);
 
-            // Check watcher results first
-            if (watcherSnapshot.Count > 0)
-            {
-                Log($"Watcher snapshot has {watcherSnapshot.Count} file(s): {string.Join(", ", watcherSnapshot.Select(Path.GetFileName))}");
-            }
-            foreach (var f in watcherSnapshot)
-            {
-                if (File.Exists(f)) { foundPath = f; break; }
-            }
-
-            // Fallback: scan known directories for the specific file
+            // Second attempt after longer wait
             if (foundPath == null)
             {
-                string[] scanDirs = new[] {
-                    Path.Combine(gameDir, "csgo"),
-                    gameDir,
-                    Environment.CurrentDirectory
-                };
-
-                foreach (var dir in scanDirs.Distinct())
-                {
-                    if (!Directory.Exists(dir)) continue;
-                    string candidate = Path.Combine(dir, stoppedDemoName);
-                    if (File.Exists(candidate)) { foundPath = candidate; break; }
-                }
-
-                // Diagnostic: log what .dem files actually exist
-                if (foundPath == null)
-                {
-                    foreach (var dir in scanDirs.Distinct())
-                    {
-                        if (!Directory.Exists(dir)) continue;
-                        try
-                        {
-                            var demFiles = Directory.GetFiles(dir, "*.dem");
-                            if (demFiles.Length > 0)
-                                Log($"Scan [{dir}]: found {demFiles.Length} .dem file(s): {string.Join(", ", demFiles.Select(Path.GetFileName).Take(10))}");
-                            else
-                                Log($"Scan [{dir}]: no .dem files");
-                        }
-                        catch { }
-                    }
-                }
+                Log($"First search for {stoppedDemoName} failed, waiting 45s more...");
+                await Task.Delay(45000);
+                foundPath = FindDemoFile(stoppedDemoName, gameDir, null);
             }
 
-            // Also check if the watcher caught it after the snapshot was taken
+            // Third attempt — the file may appear on map change
             if (foundPath == null)
             {
-                lock (_watcherLock)
-                {
-                    foreach (var f in _watcherCreatedFiles)
-                    {
-                        if (Path.GetFileName(f) == stoppedDemoName && File.Exists(f))
-                        { foundPath = f; break; }
-                    }
-                }
-            }
-
-            // Recursive search: the engine may write demos to a subdirectory
-            if (foundPath == null)
-            {
-                string[] recurseDirs = new[] {
-                    Path.Combine(gameDir, "csgo"),
-                    gameDir
-                };
-                foreach (var dir in recurseDirs.Distinct())
-                {
-                    if (!Directory.Exists(dir)) continue;
-                    try
-                    {
-                        var matches = Directory.GetFiles(dir, stoppedDemoName, SearchOption.AllDirectories);
-                        if (matches.Length > 0)
-                        {
-                            foundPath = matches[0];
-                            Log($"Found {stoppedDemoName} via recursive search: {foundPath}");
-                            break;
-                        }
-                    }
-                    catch { }
-                }
+                Log($"Second search for {stoppedDemoName} failed, waiting 90s more...");
+                await Task.Delay(90000);
+                foundPath = FindDemoFile(stoppedDemoName, gameDir, null);
             }
 
             if (foundPath == null)
             {
-                // One more attempt after a longer wait
-                await Task.Delay(30000);
-
-                string[] scanDirs2 = new[] {
-                    Path.Combine(gameDir, "csgo"),
-                    gameDir,
-                    Environment.CurrentDirectory
-                };
-
-                foreach (var dir in scanDirs2.Distinct())
-                {
-                    if (!Directory.Exists(dir)) continue;
-                    string candidate = Path.Combine(dir, stoppedDemoName);
-                    if (File.Exists(candidate)) { foundPath = candidate; break; }
-                }
-
-                // Second recursive search
-                if (foundPath == null)
-                {
-                    foreach (var dir in scanDirs2.Distinct().Take(2))
-                    {
-                        if (!Directory.Exists(dir)) continue;
-                        try
-                        {
-                            var matches = Directory.GetFiles(dir, stoppedDemoName, SearchOption.AllDirectories);
-                            if (matches.Length > 0)
-                            {
-                                foundPath = matches[0];
-                                Log($"Found {stoppedDemoName} via recursive search (2nd pass): {foundPath}");
-                                break;
-                            }
-                        }
-                        catch { }
-                    }
-                }
-            }
-
-            if (foundPath == null)
-            {
-                Log($"No demo file found for {stoppedDemoName} after extended wait.");
-                lock (_pendingLock) { _pendingFiles.Remove(stoppedDemoName); }
+                Log($"No demo file found for {stoppedDemoName} after extended wait. Will retry during GC.");
+                // Don't remove from pending — GC will find and retry
                 return;
             }
 
@@ -610,6 +491,74 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             await UploadDemoRoutine(foundPath, stoppedDemoName, null, stoppedMatchFolder, stoppedMatchDate);
             lock (_pendingLock) { _pendingFiles.Remove(stoppedDemoName); }
         });
+    }
+
+    private string? FindDemoFile(string demoName, string gameDir, List<string>? watcherSnapshot)
+    {
+        // Check watcher results
+        if (watcherSnapshot != null)
+        {
+            if (watcherSnapshot.Count > 0)
+                Log($"Watcher snapshot: {string.Join(", ", watcherSnapshot.Select(Path.GetFileName))}");
+            foreach (var f in watcherSnapshot)
+            {
+                if (File.Exists(f) && Path.GetFileName(f) == demoName) return f;
+            }
+        }
+
+        // Check late watcher results
+        lock (_watcherLock)
+        {
+            foreach (var f in _watcherCreatedFiles)
+            {
+                if (Path.GetFileName(f) == demoName && File.Exists(f)) return f;
+            }
+        }
+
+        // Direct path check in known directories
+        string[] scanDirs = new[] {
+            Path.Combine(gameDir, "csgo"),
+            gameDir,
+            Environment.CurrentDirectory
+        };
+
+        foreach (var dir in scanDirs.Distinct())
+        {
+            if (!Directory.Exists(dir)) continue;
+            string candidate = Path.Combine(dir, demoName);
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        // Recursive search
+        foreach (var dir in scanDirs.Distinct().Take(2))
+        {
+            if (!Directory.Exists(dir)) continue;
+            try
+            {
+                var matches = Directory.GetFiles(dir, demoName, SearchOption.AllDirectories);
+                if (matches.Length > 0)
+                {
+                    Log($"Found {demoName} via recursive search: {matches[0]}");
+                    return matches[0];
+                }
+            }
+            catch { }
+        }
+
+        // Diagnostic: log what .dem files exist
+        foreach (var dir in scanDirs.Distinct())
+        {
+            if (!Directory.Exists(dir)) continue;
+            try
+            {
+                var demFiles = Directory.GetFiles(dir, "*.dem");
+                if (demFiles.Length > 0)
+                    Log($"Scan [{dir}]: {demFiles.Length} .dem file(s): {string.Join(", ", demFiles.Select(Path.GetFileName).Take(10))}");
+            }
+            catch { }
+        }
+
+        return null;
     }
 
     private async Task<string?> WaitForFileStable(string filePath)
