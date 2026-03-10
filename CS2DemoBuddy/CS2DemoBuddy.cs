@@ -338,11 +338,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         string demoFileName = $"{CurrentDemoName}.dem";
         Log($"Stopped recording: {demoFileName}");
 
-        // Capture watcher results
-        List<string> watcherFiles;
-        lock (_watcherLock) { watcherFiles = new List<string>(_watcherCreatedFiles); }
+        // Snapshot watcher results at stop time (before a new recording can start)
+        List<string> watcherSnapshot;
+        lock (_watcherLock) { watcherSnapshot = new List<string>(_watcherCreatedFiles); }
 
         string gameDir = Server.GameDirectory;
+        string stoppedDemoName = demoFileName;
 
         Task.Run(async () =>
         {
@@ -351,31 +352,29 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
             List<string> filesToUpload = new();
 
-            // Primary: files detected by FileSystemWatcher
-            lock (_watcherLock)
+            // Primary: files detected by FileSystemWatcher during THIS recording
+            foreach (var f in watcherSnapshot)
             {
-                filesToUpload.AddRange(_watcherCreatedFiles.Where(File.Exists));
+                if (File.Exists(f) && !filesToUpload.Contains(f))
+                    filesToUpload.Add(f);
             }
 
-            // Fallback: scan known demo directories
-            string[] scanDirs = new[] {
-                Path.Combine(gameDir, "csgo"),
-                gameDir,
-                Environment.CurrentDirectory
-            };
-
-            foreach (var dir in scanDirs.Distinct())
+            // Fallback: scan for the specific demo file we just stopped
+            if (filesToUpload.Count == 0)
             {
-                if (!Directory.Exists(dir)) continue;
-                try
+                string[] scanDirs = new[] {
+                    Path.Combine(gameDir, "csgo"),
+                    gameDir,
+                    Environment.CurrentDirectory
+                };
+
+                foreach (var dir in scanDirs.Distinct())
                 {
-                    foreach (var f in Directory.GetFiles(dir, "*.dem"))
-                    {
-                        if (!filesToUpload.Contains(f))
-                            filesToUpload.Add(f);
-                    }
+                    if (!Directory.Exists(dir)) continue;
+                    string candidate = Path.Combine(dir, stoppedDemoName);
+                    if (File.Exists(candidate) && !filesToUpload.Contains(candidate))
+                        filesToUpload.Add(candidate);
                 }
-                catch { }
             }
 
             if (filesToUpload.Count > 0)
@@ -393,9 +392,18 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 // Extended wait - demo file may still be finalizing
                 await Task.Delay(15000);
 
-                lock (_watcherLock)
+                string[] scanDirs2 = new[] {
+                    Path.Combine(gameDir, "csgo"),
+                    gameDir,
+                    Environment.CurrentDirectory
+                };
+
+                foreach (var dir in scanDirs2.Distinct())
                 {
-                    filesToUpload.AddRange(_watcherCreatedFiles.Where(f => File.Exists(f) && !filesToUpload.Contains(f)));
+                    if (!Directory.Exists(dir)) continue;
+                    string candidate = Path.Combine(dir, stoppedDemoName);
+                    if (File.Exists(candidate) && !filesToUpload.Contains(candidate))
+                        filesToUpload.Add(candidate);
                 }
 
                 if (filesToUpload.Count > 0)
@@ -408,7 +416,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 }
                 else
                 {
-                    Log($"No demo files found for {demoFileName} after extended wait.");
+                    Log($"No demo file found for {stoppedDemoName} after extended wait.");
                 }
             }
         });
