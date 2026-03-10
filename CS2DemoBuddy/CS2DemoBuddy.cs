@@ -396,20 +396,20 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         Task.Run(async () =>
         {
-            // Wait for the engine to finish writing the demo file
-            await Task.Delay(5000);
+            // The engine needs time to finalize the demo file after tv_stoprecord.
+            // It can take 10+ seconds for the file to even appear on disk.
+            await Task.Delay(15000);
 
-            List<string> filesToUpload = new();
+            string? foundPath = null;
 
-            // Primary: files detected by FileSystemWatcher during THIS recording
+            // Check watcher results first
             foreach (var f in watcherSnapshot)
             {
-                if (File.Exists(f) && !filesToUpload.Contains(f))
-                    filesToUpload.Add(f);
+                if (File.Exists(f)) { foundPath = f; break; }
             }
 
-            // Fallback: scan for the specific demo file we just stopped
-            if (filesToUpload.Count == 0)
+            // Fallback: scan known directories for the specific file
+            if (foundPath == null)
             {
                 string[] scanDirs = new[] {
                     Path.Combine(gameDir, "csgo"),
@@ -421,38 +421,27 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 {
                     if (!Directory.Exists(dir)) continue;
                     string candidate = Path.Combine(dir, stoppedDemoName);
-                    if (File.Exists(candidate) && !filesToUpload.Contains(candidate))
-                        filesToUpload.Add(candidate);
+                    if (File.Exists(candidate)) { foundPath = candidate; break; }
                 }
             }
 
-            if (filesToUpload.Count > 0)
+            // Also check if the watcher caught it after the snapshot was taken
+            if (foundPath == null)
             {
-                Log($"Found {filesToUpload.Count} demo(s) to upload.");
-                foreach (var filePath in filesToUpload)
+                lock (_watcherLock)
                 {
-                    try
+                    foreach (var f in _watcherCreatedFiles)
                     {
-                        var fileSize = new FileInfo(filePath).Length;
-                        if (fileSize < MinDemoSizeBytes)
-                        {
-                            Log($"Skipping {Path.GetFileName(filePath)} — too small ({fileSize / 1024}KB). Deleting junk demo.");
-                            try { File.Delete(filePath); } catch { }
-                            HistoryTracker?.RemoveDemo(Path.GetFileName(filePath));
-                            continue;
-                        }
+                        if (Path.GetFileName(f) == stoppedDemoName && File.Exists(f))
+                        { foundPath = f; break; }
                     }
-                    catch { continue; }
-
-                    string fileName = Path.GetFileName(filePath);
-                    await Task.Delay(1000);
-                    UploadAndDeleteDemoRoutine(filePath, fileName);
                 }
             }
-            else
+
+            if (foundPath == null)
             {
-                // Extended wait - demo file may still be finalizing
-                await Task.Delay(15000);
+                // One more attempt after a longer wait
+                await Task.Delay(30000);
 
                 string[] scanDirs2 = new[] {
                     Path.Combine(gameDir, "csgo"),
@@ -464,24 +453,79 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 {
                     if (!Directory.Exists(dir)) continue;
                     string candidate = Path.Combine(dir, stoppedDemoName);
-                    if (File.Exists(candidate) && !filesToUpload.Contains(candidate))
-                        filesToUpload.Add(candidate);
+                    if (File.Exists(candidate)) { foundPath = candidate; break; }
                 }
+            }
 
-                if (filesToUpload.Count > 0)
+            if (foundPath == null)
+            {
+                Log($"No demo file found for {stoppedDemoName} after extended wait.");
+                return;
+            }
+
+            // Wait for the file to stop growing (engine may still be flushing)
+            foundPath = await WaitForFileStable(foundPath);
+            if (foundPath == null) return;
+
+            var finalSize = new FileInfo(foundPath).Length;
+            if (finalSize < MinDemoSizeBytes)
+            {
+                Log($"Skipping {stoppedDemoName} — too small ({finalSize / 1024}KB). Deleting junk demo.");
+                try { File.Delete(foundPath); } catch { }
+                HistoryTracker?.RemoveDemo(stoppedDemoName);
+                return;
+            }
+
+            Log($"Demo ready: {stoppedDemoName} ({finalSize / (1024 * 1024.0):F1}MB)");
+            UploadAndDeleteDemoRoutine(foundPath, stoppedDemoName);
+        });
+    }
+
+    private async Task<string?> WaitForFileStable(string filePath)
+    {
+        // Poll the file size every 5 seconds. Once it stops changing for 2 consecutive
+        // checks (10 seconds of no growth), the engine is done writing.
+        const int maxAttempts = 24; // 2 minutes max
+        long lastSize = -1;
+        int stableCount = 0;
+
+        for (int i = 0; i < maxAttempts; i++)
+        {
+            await Task.Delay(5000);
+
+            if (!File.Exists(filePath))
+            {
+                Log($"File disappeared while waiting: {Path.GetFileName(filePath)}");
+                return null;
+            }
+
+            try
+            {
+                long currentSize = new FileInfo(filePath).Length;
+                if (currentSize == lastSize && currentSize > 0)
                 {
-                    foreach (var filePath in filesToUpload)
+                    stableCount++;
+                    if (stableCount >= 2)
                     {
-                        string fileName = Path.GetFileName(filePath);
-                        UploadAndDeleteDemoRoutine(filePath, fileName);
+                        Log($"File stable at {currentSize / (1024 * 1024.0):F1}MB after {(i + 1) * 5}s.");
+                        return filePath;
                     }
                 }
                 else
                 {
-                    Log($"No demo file found for {stoppedDemoName} after extended wait.");
+                    stableCount = 0;
                 }
+                lastSize = currentSize;
             }
-        });
+            catch
+            {
+                stableCount = 0;
+            }
+        }
+
+        // Timed out but file exists — upload what we have
+        Log($"File size did not stabilize after 2 minutes, uploading anyway ({lastSize / (1024 * 1024.0):F1}MB).");
+        return File.Exists(filePath) ? filePath : null;
     }
 
     private void RunGarbageCollection()
