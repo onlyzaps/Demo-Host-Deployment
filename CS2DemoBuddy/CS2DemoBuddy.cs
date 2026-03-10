@@ -451,7 +451,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         List<string> watcherSnapshot;
         lock (_watcherLock) { watcherSnapshot = new List<string>(_watcherCreatedFiles); }
 
-        string gameDir = Server.GameDirectory;
+        string gameDir = _gameDirectory;
         string stoppedDemoName = demoFileName;
 
         Task.Run(async () =>
@@ -462,6 +462,10 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             string? foundPath = null;
 
             // Check watcher results first
+            if (watcherSnapshot.Count > 0)
+            {
+                Log($"Watcher snapshot has {watcherSnapshot.Count} file(s): {string.Join(", ", watcherSnapshot.Select(Path.GetFileName))}");
+            }
             foreach (var f in watcherSnapshot)
             {
                 if (File.Exists(f)) { foundPath = f; break; }
@@ -482,6 +486,24 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                     string candidate = Path.Combine(dir, stoppedDemoName);
                     if (File.Exists(candidate)) { foundPath = candidate; break; }
                 }
+
+                // Diagnostic: log what .dem files actually exist
+                if (foundPath == null)
+                {
+                    foreach (var dir in scanDirs.Distinct())
+                    {
+                        if (!Directory.Exists(dir)) continue;
+                        try
+                        {
+                            var demFiles = Directory.GetFiles(dir, "*.dem");
+                            if (demFiles.Length > 0)
+                                Log($"Scan [{dir}]: found {demFiles.Length} .dem file(s): {string.Join(", ", demFiles.Select(Path.GetFileName).Take(10))}");
+                            else
+                                Log($"Scan [{dir}]: no .dem files");
+                        }
+                        catch { }
+                    }
+                }
             }
 
             // Also check if the watcher caught it after the snapshot was taken
@@ -494,6 +516,30 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                         if (Path.GetFileName(f) == stoppedDemoName && File.Exists(f))
                         { foundPath = f; break; }
                     }
+                }
+            }
+
+            // Recursive search: the engine may write demos to a subdirectory
+            if (foundPath == null)
+            {
+                string[] recurseDirs = new[] {
+                    Path.Combine(gameDir, "csgo"),
+                    gameDir
+                };
+                foreach (var dir in recurseDirs.Distinct())
+                {
+                    if (!Directory.Exists(dir)) continue;
+                    try
+                    {
+                        var matches = Directory.GetFiles(dir, stoppedDemoName, SearchOption.AllDirectories);
+                        if (matches.Length > 0)
+                        {
+                            foundPath = matches[0];
+                            Log($"Found {stoppedDemoName} via recursive search: {foundPath}");
+                            break;
+                        }
+                    }
+                    catch { }
                 }
             }
 
@@ -513,6 +559,26 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                     if (!Directory.Exists(dir)) continue;
                     string candidate = Path.Combine(dir, stoppedDemoName);
                     if (File.Exists(candidate)) { foundPath = candidate; break; }
+                }
+
+                // Second recursive search
+                if (foundPath == null)
+                {
+                    foreach (var dir in scanDirs2.Distinct().Take(2))
+                    {
+                        if (!Directory.Exists(dir)) continue;
+                        try
+                        {
+                            var matches = Directory.GetFiles(dir, stoppedDemoName, SearchOption.AllDirectories);
+                            if (matches.Length > 0)
+                            {
+                                foundPath = matches[0];
+                                Log($"Found {stoppedDemoName} via recursive search (2nd pass): {foundPath}");
+                                break;
+                            }
+                        }
+                        catch { }
+                    }
                 }
             }
 
@@ -597,8 +663,8 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     {
         Log("Running garbage collection...");
         string[] possibleDirs = new[] {
-            Path.Combine(Server.GameDirectory, "csgo"),
-            Server.GameDirectory,
+            Path.Combine(_gameDirectory, "csgo"),
+            _gameDirectory,
             Environment.CurrentDirectory
         }.Distinct().ToArray();
 
