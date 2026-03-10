@@ -84,7 +84,7 @@ app.post('/upload-log', authenticateRequest, (req, res) => {
 app.get('/api/servers', (req, res) => {
   if (!fs.existsSync(storageDir)) return res.json([]);
   try {
-    const servers = fs.readdirSync(storageDir).filter(f => f !== '.logs' && fs.statSync(path.join(storageDir, f)).isDirectory());
+    const servers = fs.readdirSync(storageDir).filter(f => f.startsWith('DBS_') && fs.statSync(path.join(storageDir, f)).isDirectory());
     res.json(servers);
   } catch (err) {
     res.status(500).send('Error reading storage directory.');
@@ -189,6 +189,52 @@ app.get('/api/servers/:server/dates/:date/matches', (req, res) => {
     res.json(matches);
   } catch (err) {
     res.status(500).send('Error reading matches.');
+  }
+});
+
+// -- SOURCE FILE INVENTORY --
+
+// Receive inventory of .dem files from a CS2 server
+app.post('/upload-source-files', authenticateRequest, (req, res) => {
+  const serverName = req.body.serverName || 'Unknown_Server';
+  const files = req.body.files || [];
+  const cleanServerName = serverName.replace(/[^a-zA-Z0-9_\-]/g, '_');
+
+  const sourceDir = path.join(storageDir, '.source-files');
+  if (!fs.existsSync(sourceDir)) fs.mkdirSync(sourceDir, { recursive: true });
+
+  const data = {
+    serverName: cleanServerName,
+    updatedAt: new Date().toISOString(),
+    files: files
+  };
+  fs.writeFileSync(path.join(sourceDir, `${cleanServerName}.json`), JSON.stringify(data, null, 2));
+  res.send('Source file inventory updated.');
+});
+
+// Get all servers that have reported source files
+app.get('/api/source-files/servers', (req, res) => {
+  const sourceDir = path.join(storageDir, '.source-files');
+  if (!fs.existsSync(sourceDir)) return res.json([]);
+  try {
+    const files = fs.readdirSync(sourceDir).filter(f => f.endsWith('.json'));
+    const servers = files.map(f => f.replace('.json', '')).filter(s => s.startsWith('DBS_'));
+    res.json(servers);
+  } catch (err) {
+    res.status(500).send('Error reading source files directory.');
+  }
+});
+
+// Get source file inventory for a specific server
+app.get('/api/source-files/:server', (req, res) => {
+  const cleanServer = req.params.server.replace(/[^a-zA-Z0-9_\-]/g, '_');
+  const filePath = path.join(storageDir, '.source-files', `${cleanServer}.json`);
+  if (!fs.existsSync(filePath)) return res.json({ serverName: cleanServer, updatedAt: null, files: [] });
+  try {
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    res.json(data);
+  } catch (err) {
+    res.status(500).send('Error reading source file inventory.');
   }
 });
 

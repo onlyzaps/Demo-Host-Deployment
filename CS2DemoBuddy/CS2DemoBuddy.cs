@@ -129,6 +129,8 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private DemoHistoryTracker? HistoryTracker;
     private static readonly object _logLock = new object();
 
+    private string StorageServerName => $"DBS_{Config.ServerName}";
+
     private string CurrentDemoName = "";
     private bool IsRecording = false;
     private int _roundNumber = 0;
@@ -139,6 +141,9 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private FileSystemWatcher? _watcher;
     private List<string> _watcherCreatedFiles = new();
     private readonly object _watcherLock = new();
+    private readonly HashSet<string> _pendingFiles = new();
+    private readonly object _pendingLock = new();
+    private CancellationTokenSource? _inventoryCts;
 
     private void Log(string message)
     {
@@ -166,7 +171,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         {
             string logEndpoint = Config.ApiUrl.Replace("/upload", "/upload-log");
             string apiKey = Config.ApiSecretKey;
-            string serverName = Config.ServerName;
+            string serverName = StorageServerName;
 
             Task.Run(async () =>
             {
@@ -267,7 +272,11 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             return HookResult.Continue;
         });
 
-        AddTimer(3600.0f, RunGarbageCollection, TimerFlags.REPEAT);
+        AddTimer(2700.0f, RunGarbageCollection, TimerFlags.REPEAT);
+
+        // Periodic source-file inventory reporting
+        _inventoryCts = new CancellationTokenSource();
+        _ = RunInventoryLoop(_inventoryCts.Token);
 
         Log("===== CS2DemoBuddy v3.1.0 LOADED =====");
     }
@@ -295,6 +304,14 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         lock (_watcherLock)
         {
             _watcherCreatedFiles.Clear();
+        }
+
+        // Cancel inventory loop
+        if (_inventoryCts != null)
+        {
+            _inventoryCts.Cancel();
+            _inventoryCts.Dispose();
+            _inventoryCts = null;
         }
 
         CurrentDemoName = "";
@@ -383,7 +400,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         CurrentDemoName = $"{mapName}_round_{_roundNumber}_{roundTimestamp}";
         string demoFileName = $"{CurrentDemoName}.dem";
 
-        HistoryTracker?.AddDemo(demoFileName, Config.ServerName, _matchFolder, _matchDate);
+        HistoryTracker?.AddDemo(demoFileName, StorageServerName, _matchFolder, _matchDate);
 
         // Clear watcher list for this recording session
         lock (_watcherLock) { _watcherCreatedFiles.Clear(); }
@@ -423,6 +440,9 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         string stoppedMatchDate = _matchDate;
         Log($"Stopped recording: {demoFileName}");
 
+        // Track this demo as pending so GC won't touch it
+        lock (_pendingLock) { _pendingFiles.Add(demoFileName); }
+
         // Snapshot watcher results at stop time (before a new recording can start)
         List<string> watcherSnapshot;
         lock (_watcherLock) { watcherSnapshot = new List<string>(_watcherCreatedFiles); }
@@ -432,9 +452,8 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         Task.Run(async () =>
         {
-            // The engine needs time to finalize the demo file after tv_stoprecord.
-            // It can take 10+ seconds for the file to even appear on disk.
-            await Task.Delay(15000);
+            // Wait 30s for engine to finalize the demo file after tv_stoprecord.
+            await Task.Delay(30000);
 
             string? foundPath = null;
 
@@ -496,24 +515,30 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             if (foundPath == null)
             {
                 Log($"No demo file found for {stoppedDemoName} after extended wait.");
+                lock (_pendingLock) { _pendingFiles.Remove(stoppedDemoName); }
                 return;
             }
 
             // Wait for the file to stop growing (engine may still be flushing)
             foundPath = await WaitForFileStable(foundPath);
-            if (foundPath == null) return;
+            if (foundPath == null)
+            {
+                lock (_pendingLock) { _pendingFiles.Remove(stoppedDemoName); }
+                return;
+            }
 
             var finalSize = new FileInfo(foundPath).Length;
             if (finalSize < MinDemoSizeBytes)
             {
-                Log($"Skipping {stoppedDemoName} — too small ({finalSize / 1024}KB). Deleting junk demo.");
-                try { File.Delete(foundPath); } catch { }
+                Log($"Skipping {stoppedDemoName} — too small ({finalSize / 1024}KB). Will be cleaned up by GC.");
                 HistoryTracker?.RemoveDemo(stoppedDemoName);
+                lock (_pendingLock) { _pendingFiles.Remove(stoppedDemoName); }
                 return;
             }
 
             Log($"Demo ready: {stoppedDemoName} ({finalSize / (1024 * 1024.0):F1}MB)");
-            UploadAndDeleteDemoRoutine(foundPath, stoppedDemoName, null, stoppedMatchFolder, stoppedMatchDate);
+            await UploadDemoRoutine(foundPath, stoppedDemoName, null, stoppedMatchFolder, stoppedMatchDate);
+            lock (_pendingLock) { _pendingFiles.Remove(stoppedDemoName); }
         });
     }
 
@@ -573,6 +598,10 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             Environment.CurrentDirectory
         }.Distinct().ToArray();
 
+        // Snapshot pending files so we don't delete anything mid-upload
+        HashSet<string> pendingSnapshot;
+        lock (_pendingLock) { pendingSnapshot = new HashSet<string>(_pendingFiles); }
+
         foreach (var dir in possibleDirs)
         {
             if (!Directory.Exists(dir)) continue;
@@ -581,18 +610,26 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 foreach (var filePath in Directory.GetFiles(dir, "*.dem"))
                 {
                     string fileName = Path.GetFileName(filePath);
+
+                    // Skip the demo currently being recorded
                     if (IsRecording && fileName == $"{CurrentDemoName}.dem") continue;
+
+                    // Skip demos currently being stabilized or uploaded
+                    if (pendingSnapshot.Contains(fileName)) continue;
 
                     var (targetServer, gcMatchFolder, gcMatchDate) = HistoryTracker?.GetDemoInfo(fileName) ?? (null, null, null);
                     if (targetServer == null)
                     {
+                        // Untracked: either already uploaded or junk — safe to delete
                         Log($"GC: Deleting untracked {fileName}");
                         try { File.Delete(filePath); } catch { }
                     }
                     else
                     {
+                        // Still tracked: upload failed or hasn't been attempted yet
                         Log($"GC: Retrying upload for {fileName}");
-                        UploadAndDeleteDemoRoutine(filePath, fileName, targetServer, gcMatchFolder, gcMatchDate);
+                        lock (_pendingLock) { _pendingFiles.Add(fileName); }
+                        _ = RetryUploadAndRelease(filePath, fileName, targetServer, gcMatchFolder, gcMatchDate);
                     }
                 }
             }
@@ -600,11 +637,88 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         }
     }
 
-    private async void UploadAndDeleteDemoRoutine(string filePath, string fileName, string? serverNameFallback = null, string? matchFolder = null, string? matchDate = null)
+    private async Task RetryUploadAndRelease(string filePath, string fileName, string targetServer, string? matchFolder, string? matchDate)
+    {
+        try
+        {
+            await UploadDemoRoutine(filePath, fileName, targetServer, matchFolder, matchDate);
+        }
+        finally
+        {
+            lock (_pendingLock) { _pendingFiles.Remove(fileName); }
+        }
+    }
+
+    private async Task RunInventoryLoop(CancellationToken ct)
+    {
+        // Initial delay before first report
+        try { await Task.Delay(15000, ct); } catch (TaskCanceledException) { return; }
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await ReportSourceFiles();
+            }
+            catch (Exception ex)
+            {
+                Log($"Inventory report error: {ex.Message}");
+            }
+
+            try { await Task.Delay(60000, ct); } catch (TaskCanceledException) { return; }
+        }
+    }
+
+    private async Task ReportSourceFiles()
+    {
+        string[] scanDirs = new[] {
+            Path.Combine(Server.GameDirectory, "csgo"),
+            Server.GameDirectory,
+            Environment.CurrentDirectory
+        }.Distinct().ToArray();
+
+        var files = new List<object>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var dir in scanDirs)
+        {
+            if (!Directory.Exists(dir)) continue;
+            try
+            {
+                foreach (var filePath in Directory.GetFiles(dir, "*.dem"))
+                {
+                    string fileName = Path.GetFileName(filePath);
+                    if (!seen.Add(fileName)) continue;
+                    try
+                    {
+                        var info = new FileInfo(filePath);
+                        files.Add(new { name = fileName, sizeBytes = info.Length, modified = info.LastWriteTimeUtc.ToString("o") });
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        string endpoint = Config.ApiUrl.Replace("/upload", "/upload-source-files");
+        using var client = new HttpClient();
+        client.Timeout = TimeSpan.FromSeconds(30);
+        client.DefaultRequestHeaders.Add("x-api-key", Config.ApiSecretKey);
+
+        var payload = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            serverName = StorageServerName,
+            files = files
+        });
+        var content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+        await client.PostAsync(endpoint, content);
+    }
+
+    private async Task UploadDemoRoutine(string filePath, string fileName, string? serverNameFallback = null, string? matchFolder = null, string? matchDate = null)
     {
         if (!File.Exists(filePath)) return;
 
-        string targetServerName = serverNameFallback ?? Config.ServerName;
+        string targetServerName = serverNameFallback ?? StorageServerName;
         try
         {
             using var client = new HttpClient();
@@ -626,9 +740,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
             if (response.IsSuccessStatusCode)
             {
-                Log($"Successfully uploaded {fileName}. Deleting local file.");
-                fileStream.Close();
-                File.Delete(filePath);
+                Log($"Successfully uploaded {fileName}. File will be cleaned up by GC.");
                 HistoryTracker?.RemoveDemo(fileName);
             }
             else

@@ -193,6 +193,7 @@
     <div class="sb-left-panel">
         <div class="mode-tabs">
             <button class="mode-tab active" id="tab-demos" onclick="setMode('demos')">Demos</button>
+            <button class="mode-tab" id="tab-source" onclick="setMode('source')">Source Files</button>
             <button class="mode-tab" id="tab-logs" onclick="setMode('logs')">Live Logs</button>
         </div>
         <div class="left-panel-content">
@@ -237,25 +238,29 @@
     function setMode(mode) {
         currentMode = mode;
         document.getElementById('tab-demos').classList.toggle('active', mode === 'demos');
+        document.getElementById('tab-source').classList.toggle('active', mode === 'source');
         document.getElementById('tab-logs').classList.toggle('active', mode === 'logs');
         
-        document.getElementById('view-title').textContent = mode === 'demos' ? 'Demo Browser' : 'System Logs';
+        const titles = { demos: 'Demo Browser', source: 'Source Files', logs: 'System Logs' };
+        document.getElementById('view-title').textContent = titles[mode] || 'Demo Browser';
         
         if (mode === 'demos') {
             loadServers();
+        } else if (mode === 'source') {
+            loadSourceServers();
         } else {
             loadLogServers();
         }
     }
 
     function updateBreadcrumbs() {
-        let rootText = currentMode === 'demos' ? 'All Servers' : 'All Log Servers';
-        let rootFunc = currentMode === 'demos' ? 'loadServers()' : 'loadLogServers()';
-        let dateFunc = currentMode === 'demos' ? `loadDates('${currentServer}')` : `loadLogDates('${currentServer}')`;
+        let rootText = currentMode === 'demos' ? 'All Servers' : currentMode === 'source' ? 'All Servers' : 'All Log Servers';
+        let rootFunc = currentMode === 'demos' ? 'loadServers()' : currentMode === 'source' ? 'loadSourceServers()' : 'loadLogServers()';
+        let dateFunc = currentMode === 'demos' ? `loadDates('${currentServer}')` : currentMode === 'source' ? `loadSourceFiles('${currentServer}')` : `loadLogDates('${currentServer}')`;
 
         let bc = `<span onclick="${rootFunc}">${rootText}</span>`;
         if (currentServer) {
-            let displayServer = currentServer.replace(/^\./, '').replace(/_/g, ' ');
+            let displayServer = currentServer.replace(/^DBS_/, '').replace(/_/g, ' ');
             bc += ` &gt; <span onclick="${dateFunc}">${displayServer}</span>`;
         }
         if (currentDate) {
@@ -286,7 +291,7 @@
                 navContent.innerHTML = '<div style="padding:15px;text-align:center;color:var(--text-secondary);">No servers found.</div>';
                 return;
             }
-            navContent.innerHTML = servers.map(s => `<div class="list-item" onclick="loadDates('${s}')">&#x1F5A7; ${s.replace(/^\./, '').replace(/_/g, ' ')}</div>`).join('');
+            navContent.innerHTML = servers.map(s => `<div class="list-item" onclick="loadDates('${s}')">&#x1F5A7; ${s.replace(/^DBS_/, '').replace(/_/g, ' ')}</div>`).join('');
         } catch(e) {
             navContent.innerHTML = '<div style="padding:15px;text-align:center; color:red;">Failed to load.</div>';
         }
@@ -301,7 +306,7 @@
         const navContent = document.getElementById('left-nav-content');
         const mainContent = document.getElementById('main-content');
         
-        let displayServer = server.replace(/^\./, '').replace(/_/g, ' ');
+        let displayServer = server.replace(/^DBS_/, '').replace(/_/g, ' ');
         navTitle.textContent = "Select Date";
         navContent.innerHTML = '<div style="padding:15px;text-align:center;">Loading...</div>';
         mainContent.innerHTML = `<div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a date on the left to view demos for ${escapeHtml(displayServer)}.</div>`;
@@ -493,6 +498,95 @@
         return timeStr || '';
     }
 
+    // --- SOURCE FILES PORTION ---
+
+    async function loadSourceServers() {
+        currentServer = null;
+        currentDate = null;
+        updateBreadcrumbs();
+
+        const navTitle = document.getElementById('left-nav-title');
+        const navContent = document.getElementById('left-nav-content');
+        const mainContent = document.getElementById('main-content');
+
+        navTitle.textContent = "Select Server";
+        navContent.innerHTML = '<div style="padding:15px;text-align:center;">Loading...</div>';
+        mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a server to view .dem files on that CS2 server.</div>';
+
+        try {
+            const res = await fetch('/api/source-files/servers');
+            const servers = await res.json();
+            if (servers.length === 0) {
+                navContent.innerHTML = '<div style="padding:15px;text-align:center;color:var(--text-secondary);">No servers reporting.</div>';
+                return;
+            }
+            navContent.innerHTML = servers.map(s => `<div class="list-item" onclick="loadSourceFiles('${s}')">&amp;#x1F5A7; ${s.replace(/^DBS_/, '').replace(/_/g, ' ')}</div>`).join('');
+        } catch(e) {
+            navContent.innerHTML = '<div style="padding:15px;text-align:center; color:red;">Failed to load.</div>';
+        }
+    }
+
+    async function loadSourceFiles(server) {
+        currentServer = server;
+        currentDate = null;
+        updateBreadcrumbs();
+
+        const navTitle = document.getElementById('left-nav-title');
+        const navContent = document.getElementById('left-nav-content');
+        const mainContent = document.getElementById('main-content');
+
+        let displayServer = server.replace(/^DBS_/, '').replace(/_/g, ' ');
+        navTitle.textContent = displayServer;
+        navContent.innerHTML = `<div class="list-item" style="background: rgba(255,255,255,0.05);" onclick="loadSourceServers()">&larr; Back to Servers</div>`;
+        mainContent.innerHTML = '<div style="text-align:center; padding: 40px;">Loading source files...</div>';
+
+        try {
+            const res = await fetch(`/api/source-files/${encodeURIComponent(server)}`);
+            const data = await res.json();
+
+            if (!data.files || data.files.length === 0) {
+                mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:var(--text-secondary);">No .dem files on this server.</div>';
+                return;
+            }
+
+            let updatedNote = '';
+            if (data.updatedAt) {
+                const d = new Date(data.updatedAt);
+                updatedNote = `<div style="padding: 0 0 15px; color: var(--text-muted); font-size: 13px;">Last reported: ${d.toUTCString()}</div>`;
+            }
+
+            let html = updatedNote + `
+            <table class="demo-table">
+                <thead>
+                    <tr>
+                        <th>File Name</th>
+                        <th>Size</th>
+                        <th>Last Modified (UTC)</th>
+                    </tr>
+                </thead>
+                <tbody>
+            `;
+
+            const sorted = data.files.sort((a, b) => new Date(b.modified) - new Date(a.modified));
+            sorted.forEach(f => {
+                const sizeMB = (f.sizeBytes / (1024 * 1024)).toFixed(2);
+                const modDate = f.modified ? new Date(f.modified).toUTCString() : 'Unknown';
+                html += `
+                    <tr>
+                        <td>${escapeHtml(f.name)}</td>
+                        <td style="font-family:monospace;">${sizeMB} MB</td>
+                        <td>${escapeHtml(modDate)}</td>
+                    </tr>
+                `;
+            });
+
+            html += '</tbody></table>';
+            mainContent.innerHTML = html;
+        } catch(e) {
+            mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:red;">Error loading source files.</div>';
+        }
+    }
+
     // --- LOGS PORTION ---
 
     async function loadLogServers() {
@@ -515,7 +609,7 @@
                 navContent.innerHTML = '<div style="padding:15px;text-align:center;color:var(--text-secondary);">No log servers found.</div>';
                 return;
             }
-            navContent.innerHTML = servers.map(s => `<div class="list-item" onclick="loadLogDates('${s}')">&#x1F5A7; ${s.replace(/^\./, '').replace(/_/g, ' ')}</div>`).join('');
+            navContent.innerHTML = servers.map(s => `<div class="list-item" onclick="loadLogDates('${s}')">&#x1F5A7; ${s.replace(/^DBS_/, '').replace(/_/g, ' ')}</div>`).join('');
         } catch(e) {
             navContent.innerHTML = '<div style="padding:15px;text-align:center; color:red;">Failed to load logs.</div>';
         }
@@ -530,7 +624,7 @@
         const navContent = document.getElementById('left-nav-content');
         const mainContent = document.getElementById('main-content');
         
-        let displayServer = server.replace(/^\./, '').replace(/_/g, ' ');
+        let displayServer = server.replace(/^DBS_/, '').replace(/_/g, ' ');
         navTitle.textContent = "Select Log Date";
         navContent.innerHTML = '<div style="padding:15px;text-align:center;">Loading...</div>';
         mainContent.innerHTML = `<div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a date on the left to view logs for ${escapeHtml(displayServer)}.</div>`;
