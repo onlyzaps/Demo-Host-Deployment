@@ -218,6 +218,7 @@
     Revision Code: MatchDemos v1.2
 </div>
 
+
 <script>
     let currentMode = 'demos'; // either 'demos' or 'logs'
     let currentServer = null;
@@ -240,15 +241,15 @@
     function updateBreadcrumbs() {
         let rootText = currentMode === 'demos' ? 'All Servers' : 'All Log Servers';
         let rootFunc = currentMode === 'demos' ? 'loadServers()' : 'loadLogServers()';
-        let dateFunc = currentMode === 'demos' ? loadDates('\') : loadLogDates('\');
+        let dateFunc = currentMode === 'demos' ? `loadDates('${currentServer}')` : `loadLogDates('${currentServer}')`;
 
-        let bc = <span onclick="\">\</span>;
+        let bc = `<span onclick="${rootFunc}">${rootText}</span>`;
         if (currentServer) {
             let displayServer = currentServer.replace(/^\./, '').replace(/_/g, ' ');
-            bc +=  > <span onclick="\">\</span>;
+            bc += ` &gt; <span onclick="${dateFunc}">${displayServer}</span>`;
         }
         if (currentDate) {
-            bc +=  > <span style="color:#fff;">\</span>;
+            bc += ` &gt; <span style="color:#fff;">${currentDate}</span>`;
         }
         document.getElementById('breadcrumbs').innerHTML = bc;
     }
@@ -275,7 +276,7 @@
                 navContent.innerHTML = '<div style="padding:15px;text-align:center;color:var(--text-secondary);">No servers found.</div>';
                 return;
             }
-            navContent.innerHTML = servers.map(s => <div class="list-item" onclick="loadDates('\')">🖧 \</div>).join('');
+            navContent.innerHTML = servers.map(s => `<div class="list-item" onclick="loadDates('${s}')">&#x1F5A7; ${s.replace(/^\./, '').replace(/_/g, ' ')}</div>`).join('');
         } catch(e) {
             navContent.innerHTML = '<div style="padding:15px;text-align:center; color:red;">Failed to load.</div>';
         }
@@ -290,15 +291,16 @@
         const navContent = document.getElementById('left-nav-content');
         const mainContent = document.getElementById('main-content');
         
+        let displayServer = server.replace(/^\./, '').replace(/_/g, ' ');
         navTitle.textContent = "Select Date";
         navContent.innerHTML = '<div style="padding:15px;text-align:center;">Loading...</div>';
-        mainContent.innerHTML = <div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a date on the left to view demos for \.</div>;
+        mainContent.innerHTML = `<div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a date on the left to view demos for ${escapeHtml(displayServer)}.</div>`;
 
         try {
-            const res = await fetch(/api/servers/\/dates);
+            const res = await fetch(`/api/servers/${encodeURIComponent(server)}/dates`);
             const dates = await res.json();
             
-            let html = <div class="list-item" style="background: rgba(255,255,255,0.05);" onclick="loadServers()">← Back to Servers</div>;
+            let html = `<div class="list-item" style="background: rgba(255,255,255,0.05);" onclick="loadServers()">&larr; Back to Servers</div>`;
             
             if(dates.length === 0) {
                 html += '<div style="padding:15px;text-align:center;color:var(--text-secondary);">No dates found.</div>';
@@ -306,7 +308,7 @@
                 return;
             }
             
-            html += dates.map(d => <div class="list-item" onclick="loadDemos('\', '\', this)">📅 \</div>).join('');
+            html += dates.map(d => `<div class="list-item" onclick="loadDemos('${server}', '${d}', this)">&#x1F4C5; ${d}</div>`).join('');
             navContent.innerHTML = html;
         } catch(e) {
             navContent.innerHTML = '<div style="padding:15px;text-align:center; color:red;">Failed to load.</div>';
@@ -326,7 +328,7 @@
         mainContent.innerHTML = '<div style="text-align:center; padding: 40px;">Loading matches...</div>';
 
         try {
-            const res = await fetch(/api/servers/\/dates/\/demos);
+            const res = await fetch(`/api/servers/${encodeURIComponent(server)}/dates/${encodeURIComponent(date)}/demos`);
             const demos = await res.json();
             
             if(demos.length === 0) {
@@ -334,7 +336,7 @@
                 return;
             }
 
-            let html = 
+            let html = `
             <table class="demo-table">
                 <thead>
                     <tr>
@@ -345,22 +347,22 @@
                     </tr>
                 </thead>
                 <tbody>
-            ;
+            `;
             demos.forEach(demo => {
                 let friendlyName = demo.name.replace('.dem', '');
                 let mapParts = friendlyName.split('_');
                 let displayMap = mapParts.length > 0 ? mapParts[0] : friendlyName;
 
-                html += 
+                html += `
                     <tr>
-                        <td style="font-weight:bold; color:#fff;">\ <div style="font-size:0.75rem; color:var(--text-secondary); font-weight:normal;">\</div></td>
-                        <td>\</td>
-                        <td style="font-family:monospace;">\</td>
-                        <td><a href="/demos/\" download class="download-btn">Download .dem</a></td>
+                        <td style="font-weight:bold; color:#fff;">${escapeHtml(displayMap)} <div style="font-size:0.75rem; color:var(--text-secondary); font-weight:normal;">${escapeHtml(friendlyName)}</div></td>
+                        <td>${new Date(demo.date).toLocaleString()}</td>
+                        <td style="font-family:monospace;">${escapeHtml(demo.size)}</td>
+                        <td><a href="/demos/${encodeURI(demo.path)}" download class="download-btn">Download .dem</a></td>
                     </tr>
-                ;
+                `;
             });
-            html += </tbody></table>;
+            html += `</tbody></table>`;
             mainContent.innerHTML = html;
         } catch(e) {
             mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:red;">Error loading demos. Internal server error.</div>';
@@ -389,7 +391,7 @@
                 navContent.innerHTML = '<div style="padding:15px;text-align:center;color:var(--text-secondary);">No log servers found.</div>';
                 return;
             }
-            navContent.innerHTML = servers.map(s => <div class="list-item" onclick="loadLogDates('\')">🖧 \</div>).join('');
+            navContent.innerHTML = servers.map(s => `<div class="list-item" onclick="loadLogDates('${s}')">&#x1F5A7; ${s.replace(/^\./, '').replace(/_/g, ' ')}</div>`).join('');
         } catch(e) {
             navContent.innerHTML = '<div style="padding:15px;text-align:center; color:red;">Failed to load logs.</div>';
         }
@@ -404,15 +406,16 @@
         const navContent = document.getElementById('left-nav-content');
         const mainContent = document.getElementById('main-content');
         
+        let displayServer = server.replace(/^\./, '').replace(/_/g, ' ');
         navTitle.textContent = "Select Log Date";
         navContent.innerHTML = '<div style="padding:15px;text-align:center;">Loading...</div>';
-        mainContent.innerHTML = <div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a date on the left to view logs for \.</div>;
+        mainContent.innerHTML = `<div style="text-align:center; padding: 40px; color: var(--text-secondary);">Select a date on the left to view logs for ${escapeHtml(displayServer)}.</div>`;
 
         try {
-            const res = await fetch(/api/logs/\/dates);
+            const res = await fetch(`/api/logs/${encodeURIComponent(server)}/dates`);
             const dates = await res.json();
             
-            let html = <div class="list-item" style="background: rgba(255,255,255,0.05);" onclick="loadLogServers()">← Back to Servers</div>;
+            let html = `<div class="list-item" style="background: rgba(255,255,255,0.05);" onclick="loadLogServers()">&larr; Back to Servers</div>`;
             
             if(dates.length === 0) {
                 html += '<div style="padding:15px;text-align:center;color:var(--text-secondary);">No logs found.</div>';
@@ -420,7 +423,7 @@
                 return;
             }
             
-            html += dates.map(d => <div class="list-item" onclick="loadLogContent('\', '\', this)">📜 \</div>).join('');
+            html += dates.map(d => `<div class="list-item" onclick="loadLogContent('${server}', '${d}', this)">&#x1F4DC; ${d}</div>`).join('');
             navContent.innerHTML = html;
         } catch(e) {
             navContent.innerHTML = '<div style="padding:15px;text-align:center; color:red;">Failed to load.</div>';
@@ -440,7 +443,7 @@
         mainContent.innerHTML = '<div style="text-align:center; padding: 40px;">Fetching logs...</div>';
 
         try {
-            const res = await fetch(/api/logs/\/dates/\/content);
+            const res = await fetch(`/api/logs/${encodeURIComponent(server)}/dates/${encodeURIComponent(date)}/content`);
             const txt = await res.text();
             
             if(!txt || txt.trim() === '') {
@@ -448,7 +451,7 @@
                 return;
             }
 
-            mainContent.innerHTML = <div class="log-viewer">\</div>;
+            mainContent.innerHTML = `<div class="log-viewer">${escapeHtml(txt)}</div>`;
             
             // Auto scroll to bottom of log
             const viewer = mainContent.querySelector('.log-viewer');

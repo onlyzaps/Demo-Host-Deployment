@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "6HIdQa7o1VM=",
+  "dgSpecHash": "yG0GWkPEO6s=",
   "success": true,
-  "projectFilePath": "c:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj",
+  "projectFilePath": "C:\\Users\\vindict6\\Desktop\\CS2DemoBuddy\\CS2DemoBuddy\\CS2DemoBuddy.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\vindict6\\.nuget\\packages\\counterstrikesharp.api\\1.0.267\\counterstrikesharp.api.1.0.267.nupkg.sha512",
     "C:\\Users\\vindict6\\.nuget\\packages\\mcmaster.netcore.plugins\\1.4.0\\mcmaster.netcore.plugins.1.4.0.nupkg.sha512",

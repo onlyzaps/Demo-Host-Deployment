@@ -15,7 +15,7 @@ public class CS2DemoBuddyConfig : BasePluginConfig
 
     [JsonPropertyName("ApiUrl")]
     public string ApiUrl { get; set; } = "http://YOUR_LINUX_SERVER_IP:8080/upload";
-    
+
     [JsonPropertyName("ApiSecretKey")]
     public string ApiSecretKey { get; set; } = "";
 }
@@ -81,7 +81,7 @@ public class DemoHistoryTracker
                 var elements = doc.Element("DemoHistory")?.Elements("Demo").Where(e => e.Attribute("FileName")?.Value == fileName).ToList();
                 if (elements != null && elements.Any())
                 {
-                    foreach(var el in elements) el.Remove();
+                    foreach (var el in elements) el.Remove();
                     doc.Save(_xmlFilePath);
                 }
             }
@@ -115,7 +115,7 @@ public class DemoHistoryTracker
 public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 {
     public override string ModuleName => "CS2DemoBuddy";
-    public override string ModuleVersion => "2.1.0";
+    public override string ModuleVersion => "3.0.0";
     public override string ModuleAuthor => "GitHub Copilot";
 
     public CS2DemoBuddyConfig Config { get; set; } = new();
@@ -124,7 +124,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private string CurrentDemoName = "";
     private bool IsRecording = false;
-    private HashSet<string> _knownDemFiles = new();
+
     private FileSystemWatcher? _watcher;
     private List<string> _watcherCreatedFiles = new();
     private readonly object _watcherLock = new();
@@ -133,7 +133,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     {
         Console.WriteLine($"[CS2DemoBuddy] {message}");
         string logEntry = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}";
-        
+
         try
         {
             string configDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../configs/plugins/CS2DemoBuddy"));
@@ -157,17 +157,21 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             string apiKey = Config.ApiSecretKey;
             string serverName = Config.ServerName;
 
-            Task.Run(async () => {
-                try {
+            Task.Run(async () =>
+            {
+                try
+                {
                     using var client = new HttpClient();
                     client.DefaultRequestHeaders.Add("x-api-key", apiKey);
-                    var json = System.Text.Json.JsonSerializer.Serialize(new {
+                    var json = System.Text.Json.JsonSerializer.Serialize(new
+                    {
                         serverName = serverName,
                         log = logEntry
                     });
                     var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
                     await client.PostAsync(logEndpoint, content);
-                } catch { } 
+                }
+                catch { }
             });
         }
         catch { }
@@ -184,50 +188,48 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     public override void Load(bool hotReload)
     {
-        Log("===== CS2DemoBuddy v2.1.0 LOADING =====");
+        Log("===== CS2DemoBuddy v3.0.0 LOADING =====");
 
         string configDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../configs/plugins/CS2DemoBuddy"));
         if (!Directory.Exists(configDir)) Directory.CreateDirectory(configDir);
         HistoryTracker = new DemoHistoryTracker(configDir, Log);
 
-        Log($"DIAG: Server.GameDirectory = {Server.GameDirectory}");
-        Log($"DIAG: Environment.CurrentDirectory = {Environment.CurrentDirectory}");
+        SetupFileWatcher();
 
-        // --- Setup FileSystemWatchers to catch ANY .dem creation anywhere ---
-        SetupFileWatchers();
-
-        // --- CRITICAL: Force GOTV settings that are known to fix tv_record ---
+        // CRITICAL: tv_delay 0 is required for tv_record to produce files
         Server.ExecuteCommand("tv_enable 1");
         Server.ExecuteCommand("tv_delay 0");
         Server.ExecuteCommand("tv_deltacache -1");
         Server.ExecuteCommand("tv_snapshotrate 64");
         Server.ExecuteCommand("tv_transmitall 1");
-        Log("DIAG: Sent tv_enable 1, tv_delay 0, tv_deltacache -1, tv_snapshotrate 64, tv_transmitall 1");
-
-        SnapshotDemFiles("BOOT");
 
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
 
-        RegisterEventHandler<EventRoundStart>((@event, info) => {
+        RegisterEventHandler<EventRoundStart>((@event, info) =>
+        {
             if (!IsRecording)
             {
-                try {
+                try
+                {
                     var players = Utilities.GetPlayers();
                     int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
                     if (humanCount > 0)
                     {
-                        Log($"DIAG: RoundStart with {humanCount} human(s). Starting recording...");
+                        Log($"RoundStart with {humanCount} human(s). Starting recording...");
                         StartRecording();
                     }
-                } catch (Exception ex) {
+                }
+                catch (Exception ex)
+                {
                     Log($"RoundStart handler error: {ex.Message}");
                 }
             }
             return HookResult.Continue;
         });
 
-        RegisterEventHandler<EventCsWinPanelMatch>((@event, info) => {
+        RegisterEventHandler<EventCsWinPanelMatch>((@event, info) =>
+        {
             StopAndUploadDemo();
             return HookResult.Continue;
         });
@@ -235,91 +237,32 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         AddTimer(15.0f, PlayerCheckLoop, TimerFlags.REPEAT);
         AddTimer(3600.0f, RunGarbageCollection, TimerFlags.REPEAT);
 
-        Log("===== CS2DemoBuddy v2.1.0 LOADED =====");
+        Log("===== CS2DemoBuddy v3.0.0 LOADED =====");
     }
 
-    private void SetupFileWatchers()
+    private void SetupFileWatcher()
     {
-        // Watch the ENTIRE /CS2 tree for any .dem file creation
-        try {
-            string watchRoot = Directory.GetParent(Server.GameDirectory)?.FullName ?? Server.GameDirectory;
+        try
+        {
+            string watchRoot = Path.Combine(Server.GameDirectory, "csgo");
+            if (!Directory.Exists(watchRoot))
+                watchRoot = Server.GameDirectory;
+
             _watcher = new FileSystemWatcher(watchRoot);
             _watcher.Filter = "*.dem";
             _watcher.IncludeSubdirectories = true;
             _watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime | NotifyFilters.Size;
-            _watcher.Created += (sender, e) => {
+            _watcher.Created += (sender, e) =>
+            {
                 lock (_watcherLock) { _watcherCreatedFiles.Add(e.FullPath); }
-                Log($"WATCHER: .dem file CREATED at {e.FullPath}");
-            };
-            _watcher.Changed += (sender, e) => {
-                Log($"WATCHER: .dem file CHANGED at {e.FullPath}");
+                Log($"Demo file detected: {e.FullPath}");
             };
             _watcher.EnableRaisingEvents = true;
-            Log($"DIAG: FileSystemWatcher active on {watchRoot} (recursive)");
-        } catch (Exception ex) {
-            Log($"DIAG: FileSystemWatcher setup FAILED: {ex.Message}");
+            Log($"FileSystemWatcher active on {watchRoot}");
         }
-
-        // Also watch the CWD separately in case it's on a different mount
-        try {
-            string cwd = Environment.CurrentDirectory;
-            var cwdWatcher = new FileSystemWatcher(cwd);
-            cwdWatcher.Filter = "*.dem";
-            cwdWatcher.IncludeSubdirectories = true;
-            cwdWatcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime | NotifyFilters.Size;
-            cwdWatcher.Created += (sender, e) => {
-                lock (_watcherLock) { _watcherCreatedFiles.Add(e.FullPath); }
-                Log($"WATCHER-CWD: .dem file CREATED at {e.FullPath}");
-            };
-            cwdWatcher.EnableRaisingEvents = true;
-            Log($"DIAG: CWD FileSystemWatcher active on {cwd}");
-        } catch (Exception ex) {
-            Log($"DIAG: CWD FileSystemWatcher FAILED: {ex.Message}");
-        }
-    }
-
-    private void SnapshotDemFiles(string label)
-    {
-        try {
-            string gameDir = Server.GameDirectory;
-            string parentDir = Directory.GetParent(gameDir)?.FullName ?? gameDir;
-            string csgoDir = Path.Combine(gameDir, "csgo");
-            
-            var allDems = new List<string>();
-            
-            string[] checkDirs = new[] {
-                gameDir,
-                parentDir,
-                csgoDir,
-                Path.Combine(gameDir, "bin", "linuxsteamrt64"),
-                Path.Combine(gameDir, "bin", "win64"),
-                Environment.CurrentDirectory
-            };
-
-            foreach (var dir in checkDirs.Distinct())
-            {
-                if (!Directory.Exists(dir)) continue;
-                try {
-                    foreach (var f in Directory.GetFiles(dir, "*.dem"))
-                        if (!allDems.Contains(f)) allDems.Add(f);
-                } catch { }
-            }
-            
-            try {
-                foreach (var f in Directory.GetFiles(parentDir, "*.dem", SearchOption.AllDirectories))
-                    if (!allDems.Contains(f)) allDems.Add(f);
-            } catch { }
-
-            if (allDems.Count > 0) {
-                string list = string.Join(", ", allDems.Select(f => { try { return $"{f} ({new FileInfo(f).Length}b)"; } catch { return f; } }));
-                Log($"SNAPSHOT [{label}]: {allDems.Count} .dem files: {list}");
-            } else {
-                Log($"SNAPSHOT [{label}]: ZERO .dem files found.");
-            }
-            
-            _knownDemFiles = new HashSet<string>(allDems);
-        } catch (Exception ex) {
-            Log($"SNAPSHOT [{label}] ERROR: {ex.Message}");
+        catch (Exception ex)
+        {
+            Log($"FileSystemWatcher setup failed: {ex.Message}");
         }
     }
 
@@ -334,7 +277,6 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
             if (humanCount > 0)
             {
-                Log($"DIAG: PlayerCheck found {humanCount} human(s). Starting recording...");
                 StartRecording();
             }
         }
@@ -358,150 +300,24 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // Clear any stuck recording state
         Server.ExecuteCommand("tv_stoprecord");
 
-        // Force GOTV settings again
+        // Force GOTV settings (tv_delay 0 is the critical one)
         Server.ExecuteCommand("tv_enable 1");
         Server.ExecuteCommand("tv_delay 0");
         Server.ExecuteCommand("tv_transmitall 1");
 
-        // Clear watcher list
+        // Clear watcher list for this recording session
         lock (_watcherLock) { _watcherCreatedFiles.Clear(); }
 
-        SnapshotDemFiles("PRE-RECORD");
-
-        // ---- TRY MULTIPLE tv_record APPROACHES ----
-
-        // Approach 1: Simple name (what most plugins do)
-        Log($"DIAG: [Approach 1] tv_record {CurrentDemoName}");
         Server.ExecuteCommand($"tv_record {CurrentDemoName}");
-
         IsRecording = true;
-        Log($"Started recording demo: {demoFileName}");
-
-        // After 5 seconds, check if it worked. If not, try more approaches.
-        AddTimer(5.0f, () => {
-            bool anyWatcherFiles;
-            lock (_watcherLock) { anyWatcherFiles = _watcherCreatedFiles.Count > 0; }
-
-            if (anyWatcherFiles)
-            {
-                string files;
-                lock (_watcherLock) { files = string.Join(", ", _watcherCreatedFiles); }
-                Log($"DIAG: [Approach 1] SUCCESS via watcher! Files: {files}");
-                return;
-            }
-
-            Log("DIAG: [Approach 1] FAILED. No files detected by watchers. Stopping and trying approach 2...");
-            Server.ExecuteCommand("tv_stoprecord");
-
-            // Approach 2: Record with path relative to csgo/
-            string relPath = $"../../csgo/{CurrentDemoName}_v2";
-            Log($"DIAG: [Approach 2] tv_record {relPath}");
-            Server.ExecuteCommand($"tv_record {relPath}");
-
-            AddTimer(5.0f, () => {
-                bool anyWatcher2;
-                lock (_watcherLock) { anyWatcher2 = _watcherCreatedFiles.Count > 0; }
-
-                if (anyWatcher2)
-                {
-                    string files2;
-                    lock (_watcherLock) { files2 = string.Join(", ", _watcherCreatedFiles); }
-                    Log($"DIAG: [Approach 2] SUCCESS! Files: {files2}");
-                    return;
-                }
-
-                Log("DIAG: [Approach 2] FAILED. Trying approach 3...");
-                Server.ExecuteCommand("tv_stoprecord");
-
-                // Approach 3: Absolute path to csgo dir
-                string csgoDir = Path.Combine(Server.GameDirectory, "csgo");
-                string absPath = Path.Combine(csgoDir, $"{CurrentDemoName}_v3");
-                Log($"DIAG: [Approach 3] tv_record {absPath}");
-                Server.ExecuteCommand($"tv_record {absPath}");
-
-                AddTimer(5.0f, () => {
-                    bool anyWatcher3;
-                    lock (_watcherLock) { anyWatcher3 = _watcherCreatedFiles.Count > 0; }
-
-                    if (anyWatcher3)
-                    {
-                        string files3;
-                        lock (_watcherLock) { files3 = string.Join(", ", _watcherCreatedFiles); }
-                        Log($"DIAG: [Approach 3] SUCCESS! Files: {files3}");
-                        return;
-                    }
-
-                    Log("DIAG: [Approach 3] FAILED. Trying approach 4...");
-                    Server.ExecuteCommand("tv_stoprecord");
-
-                    // Approach 4: Just a single word name, no special chars at all
-                    string simpleName = "demobuddy_test";
-                    Log($"DIAG: [Approach 4] tv_record {simpleName}");
-                    Server.ExecuteCommand($"tv_record {simpleName}");
-
-                    AddTimer(5.0f, () => {
-                        bool anyWatcher4;
-                        lock (_watcherLock) { anyWatcher4 = _watcherCreatedFiles.Count > 0; }
-
-                        if (anyWatcher4)
-                        {
-                            string files4;
-                            lock (_watcherLock) { files4 = string.Join(", ", _watcherCreatedFiles); }
-                            Log($"DIAG: [Approach 4] SUCCESS! Files: {files4}");
-                            return;
-                        }
-
-                        Log("DIAG: [Approach 4] FAILED. Trying approach 5 - tv_autorecord...");
-                        Server.ExecuteCommand("tv_stoprecord");
-
-                        // Approach 5: Let the engine auto-record
-                        Server.ExecuteCommand("tv_autorecord 1");
-                        Log("DIAG: [Approach 5] Set tv_autorecord 1. Checking in 10 seconds...");
-
-                        AddTimer(10.0f, () => {
-                            bool anyWatcher5;
-                            lock (_watcherLock) { anyWatcher5 = _watcherCreatedFiles.Count > 0; }
-
-                            if (anyWatcher5)
-                            {
-                                string files5;
-                                lock (_watcherLock) { files5 = string.Join(", ", _watcherCreatedFiles); }
-                                Log($"DIAG: [Approach 5] SUCCESS! tv_autorecord created: {files5}");
-                            }
-                            else
-                            {
-                                SnapshotDemFiles("ALL-APPROACHES-FAILED");
-                                Log("DIAG: ALL 5 APPROACHES FAILED. tv_record is broken on this server instance.");
-                                Log("DIAG: This is likely a hosting provider restriction or a CS2 engine bug.");
-                                Log("DIAG: Try running 'tv_status' via RCON to see what the engine reports.");
-                                Log("DIAG: Also check if your hosting provider allows GOTV recording.");
-
-                                // Enumerate the csgo dir structure for clues
-                                try {
-                                    string csgo = Path.Combine(Server.GameDirectory, "csgo");
-                                    if (Directory.Exists(csgo)) {
-                                        var topItems = Directory.GetFileSystemEntries(csgo).Take(30);
-                                        Log($"DIAG: /CS2/game/csgo/ contents (first 30): {string.Join(", ", topItems.Select(Path.GetFileName))}");
-                                    }
-                                    string cwd = Environment.CurrentDirectory;
-                                    var cwdItems = Directory.GetFileSystemEntries(cwd).Take(20);
-                                    Log($"DIAG: CWD contents (first 20): {string.Join(", ", cwdItems.Select(Path.GetFileName))}");
-                                } catch (Exception ex) {
-                                    Log($"DIAG: Dir enumeration error: {ex.Message}");
-                                }
-                            }
-                        });
-                    });
-                });
-            });
-        });
+        Log($"Started recording: {demoFileName}");
     }
 
     private void OnMapStart(string mapName)
     {
         IsRecording = false;
         Log($"Map started: {mapName}");
-        
+
         Server.ExecuteCommand("tv_enable 1");
         Server.ExecuteCommand("tv_delay 0");
         Server.ExecuteCommand("tv_transmitall 1");
@@ -522,76 +338,63 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         string demoFileName = $"{CurrentDemoName}.dem";
         Log($"Stopped recording: {demoFileName}");
 
-        // Capture watcher results on the main thread
+        // Capture watcher results
         List<string> watcherFiles;
         lock (_watcherLock) { watcherFiles = new List<string>(_watcherCreatedFiles); }
 
-        if (watcherFiles.Count > 0)
-        {
-            Log($"Watcher captured {watcherFiles.Count} file(s) during this session: {string.Join(", ", watcherFiles)}");
-        }
-
         string gameDir = Server.GameDirectory;
-        string parentDir = Directory.GetParent(gameDir)?.FullName ?? gameDir;
 
         Task.Run(async () =>
         {
+            // Wait for the engine to finish writing the demo file
             await Task.Delay(5000);
 
-            // First check watcher results
             List<string> filesToUpload = new();
+
+            // Primary: files detected by FileSystemWatcher
             lock (_watcherLock)
             {
                 filesToUpload.AddRange(_watcherCreatedFiles.Where(File.Exists));
             }
 
-            // Also do manual scan
+            // Fallback: scan known demo directories
             string[] scanDirs = new[] {
-                gameDir,
                 Path.Combine(gameDir, "csgo"),
-                parentDir,
-                Path.Combine(gameDir, "bin", "linuxsteamrt64"),
+                gameDir,
                 Environment.CurrentDirectory
             };
 
             foreach (var dir in scanDirs.Distinct())
             {
                 if (!Directory.Exists(dir)) continue;
-                try {
+                try
+                {
                     foreach (var f in Directory.GetFiles(dir, "*.dem"))
                     {
-                        if (!_knownDemFiles.Contains(f) && !filesToUpload.Contains(f))
+                        if (!filesToUpload.Contains(f))
                             filesToUpload.Add(f);
                     }
-                } catch { }
-            }
-
-            // Deep recursive scan
-            try {
-                foreach (var f in Directory.GetFiles(parentDir, "*.dem", SearchOption.AllDirectories))
-                {
-                    if (!_knownDemFiles.Contains(f) && !filesToUpload.Contains(f))
-                        filesToUpload.Add(f);
                 }
-            } catch { }
+                catch { }
+            }
 
             if (filesToUpload.Count > 0)
             {
-                Log($"Found {filesToUpload.Count} demo(s) to upload!");
+                Log($"Found {filesToUpload.Count} demo(s) to upload.");
                 foreach (var filePath in filesToUpload)
                 {
                     string fileName = Path.GetFileName(filePath);
-                    try { Log($"Uploading: {filePath} ({new FileInfo(filePath).Length} bytes)"); } catch { }
                     await Task.Delay(1000);
                     UploadAndDeleteDemoRoutine(filePath, fileName);
                 }
             }
             else
             {
-                // Wait longer
+                // Extended wait - demo file may still be finalizing
                 await Task.Delay(15000);
 
-                lock (_watcherLock) {
+                lock (_watcherLock)
+                {
                     filesToUpload.AddRange(_watcherCreatedFiles.Where(f => File.Exists(f) && !filesToUpload.Contains(f)));
                 }
 
@@ -605,7 +408,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 }
                 else
                 {
-                    Log($"ERROR: No demo files found after extended wait.");
+                    Log($"No demo files found for {demoFileName} after extended wait.");
                 }
             }
         });
@@ -614,35 +417,36 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private void RunGarbageCollection()
     {
         Log("Running garbage collection...");
-        string baseDir = Server.GameDirectory;
-        string parentDir = Directory.GetParent(baseDir)?.FullName ?? baseDir;
-        
         string[] possibleDirs = new[] {
-            baseDir, parentDir,
-            Path.Combine(baseDir, "csgo"),
-            Path.Combine(baseDir, "bin", "linuxsteamrt64"),
+            Path.Combine(Server.GameDirectory, "csgo"),
+            Server.GameDirectory,
             Environment.CurrentDirectory
         }.Distinct().ToArray();
 
         foreach (var dir in possibleDirs)
         {
             if (!Directory.Exists(dir)) continue;
-            try {
+            try
+            {
                 foreach (var filePath in Directory.GetFiles(dir, "*.dem"))
                 {
                     string fileName = Path.GetFileName(filePath);
                     if (IsRecording && fileName == $"{CurrentDemoName}.dem") continue;
 
                     string? targetServer = HistoryTracker?.GetTargetServerName(fileName);
-                    if (targetServer == null) {
+                    if (targetServer == null)
+                    {
                         Log($"GC: Deleting untracked {fileName}");
                         try { File.Delete(filePath); } catch { }
-                    } else {
+                    }
+                    else
+                    {
                         Log($"GC: Retrying upload for {fileName}");
                         UploadAndDeleteDemoRoutine(filePath, fileName, targetServer);
                     }
                 }
-            } catch { }
+            }
+            catch { }
         }
     }
 
@@ -674,7 +478,6 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 fileStream.Close();
                 File.Delete(filePath);
                 HistoryTracker?.RemoveDemo(fileName);
-                _knownDemFiles.Remove(filePath);
             }
             else
             {
