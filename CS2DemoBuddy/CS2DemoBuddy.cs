@@ -1,6 +1,7 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Commands;
+using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Timers;
 using System.Net.Http.Headers;
 using System.Text.Json.Serialization;
@@ -352,6 +353,20 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         Server.ExecuteCommand("tv_autorecord 0");
 
         Log("GOTV settings applied: tv_enable 1, tv_delay 0, tv_transmitall 0, tv_record_immediate 1, tv_snapshotrate 32, tv_maxrate 0");
+
+        // Diagnostic: log actual ConVar values to verify nothing is overriding us
+        try
+        {
+            var delayVar = ConVar.Find("tv_delay");
+            var transmitVar = ConVar.Find("tv_transmitall");
+            var snapVar = ConVar.Find("tv_snapshotrate");
+            var immediateVar = ConVar.Find("tv_record_immediate");
+            Log($"GOTV cvar check — tv_delay={delayVar?.GetPrimitiveValue<float>()}, tv_transmitall={transmitVar?.GetPrimitiveValue<bool>()}, tv_snapshotrate={snapVar?.GetPrimitiveValue<float>()}, tv_record_immediate={immediateVar?.GetPrimitiveValue<bool>()}");
+        }
+        catch (Exception ex)
+        {
+            Log($"ConVar diagnostic failed: {ex.Message}");
+        }
     }
 
     private void SetupFileWatcher()
@@ -412,8 +427,20 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         Server.NextFrame(() =>
         {
+            // Force tv_delay 0 immediately before recording as a safety net.
+            // Something on this server overrides tv_delay to 30 after map start.
+            // tv_delay > 0 prevents tick data from being written to the demo file.
+            Server.ExecuteCommand("tv_delay 0");
             Server.ExecuteCommand($"tv_record {CurrentDemoName}");
             Log($"Started recording: {demoFileName} (Match: {_matchFolder})");
+
+            // Log actual cvar values at recording start
+            try
+            {
+                var delayVar = ConVar.Find("tv_delay");
+                Log($"At recording start — tv_delay={delayVar?.GetPrimitiveValue<float>()}");
+            }
+            catch { }
         });
 
         IsRecording = true;
@@ -426,10 +453,24 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         _matchDate = "";
         Log($"Map started: {mapName}");
 
-        // Re-apply GOTV settings every map start. Server.cfg and other
-        // configs can override our settings between maps. This ensures
-        // tv_delay 0 and tv_transmitall 1 are always active.
+        // Apply GOTV settings immediately...
         ApplyGotvSettings();
+
+        // ...and again after 3 seconds. Something on the server (gamemode cfg,
+        // another plugin, or the engine itself) overrides tv_delay to 30 after
+        // map start. The delayed re-apply ensures our settings win.
+        AddTimer(3.0f, () =>
+        {
+            Log("Re-applying GOTV settings (delayed post-map-start)...");
+            ApplyGotvSettings();
+        });
+
+        // One more at 10 seconds for good measure
+        AddTimer(10.0f, () =>
+        {
+            Log("Re-applying GOTV settings (10s post-map-start)...");
+            ApplyGotvSettings();
+        });
     }
 
     private void OnMapEnd()
