@@ -123,7 +123,7 @@ public class DemoHistoryTracker
 public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 {
     public override string ModuleName => "CS2DemoBuddy";
-    public override string ModuleVersion => "3.3.1";
+    public override string ModuleVersion => "3.3.2";
     public override string ModuleAuthor => "VinSix";
 
     public CS2DemoBuddyConfig Config { get; set; } = new();
@@ -205,7 +205,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     public override void Load(bool hotReload)
     {
-        Log("===== CS2DemoBuddy v3.3.1 LOADING =====");
+        Log($"===== CS2DemoBuddy v{ModuleVersion} LOADING =====");
 
         // Cache game directory for background thread access
         _gameDirectory = Server.GameDirectory;
@@ -275,12 +275,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         _inventoryCts = new CancellationTokenSource();
         _ = RunInventoryLoop(_inventoryCts.Token);
 
-        Log("===== CS2DemoBuddy v3.3.1 LOADED =====");
+        Log($"===== CS2DemoBuddy v{ModuleVersion} LOADED =====");
     }
 
     public override void Unload(bool hotReload)
     {
-        Log("===== CS2DemoBuddy v3.3.1 UNLOADING =====");
+        Log($"===== CS2DemoBuddy v{ModuleVersion} UNLOADING =====");
 
         // Stop any active recording
         if (IsRecording)
@@ -314,7 +314,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         CurrentDemoName = "";
         HistoryTracker = null;
 
-        Log("===== CS2DemoBuddy v3.3.1 UNLOADED =====");
+        Log($"===== CS2DemoBuddy v{ModuleVersion} UNLOADED =====");
     }
 
     private void ApplyGotvSettings()
@@ -361,7 +361,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             var transmitVar = ConVar.Find("tv_transmitall");
             var snapVar = ConVar.Find("tv_snapshotrate");
             var immediateVar = ConVar.Find("tv_record_immediate");
-            Log($"GOTV cvar check — tv_delay={delayVar?.GetPrimitiveValue<float>()}, tv_transmitall={transmitVar?.GetPrimitiveValue<bool>()}, tv_snapshotrate={snapVar?.GetPrimitiveValue<float>()}, tv_record_immediate={immediateVar?.GetPrimitiveValue<bool>()}");
+            Log($"GOTV cvar check — tv_delay={delayVar?.GetPrimitiveValue<int>()}, tv_transmitall={transmitVar?.GetPrimitiveValue<int>()}, tv_snapshotrate={snapVar?.GetPrimitiveValue<int>()}, tv_record_immediate={immediateVar?.GetPrimitiveValue<int>()}");
         }
         catch (Exception ex)
         {
@@ -438,7 +438,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             try
             {
                 var delayVar = ConVar.Find("tv_delay");
-                Log($"At recording start — tv_delay={delayVar?.GetPrimitiveValue<float>()}");
+                Log($"At recording start — tv_delay={delayVar?.GetPrimitiveValue<int>()}");
             }
             catch { }
         });
