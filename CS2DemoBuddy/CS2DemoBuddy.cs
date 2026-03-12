@@ -145,6 +145,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private readonly object _pendingLock = new();
     private CancellationTokenSource? _inventoryCts;
     private string _gameDirectory = "";
+    private CounterStrikeSharp.API.Modules.Timers.Timer? _sizeMonitorTimer;
 
     private void Log(string message)
     {
@@ -319,6 +320,15 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private void ApplyGotvSettings()
     {
+        // NEVER change GOTV cvars while recording — changing tv_delay (or most
+        // tv_* cvars) mid-recording resets the GOTV buffer and produces a
+        // ~107KB header-only demo file with zero tick data.
+        if (IsRecording)
+        {
+            Log("Skipping ApplyGotvSettings — recording is active.");
+            return;
+        }
+
         Log("Applying GOTV settings...");
 
         // IMPORTANT: tv_enable is a startup-only cvar in CS2. This command
@@ -355,17 +365,29 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         Log("GOTV settings applied: tv_enable 1, tv_delay 0, tv_transmitall 0, tv_record_immediate 1, tv_snapshotrate 32, tv_maxrate 0");
 
         // Diagnostic: log actual ConVar values to verify nothing is overriding us
+        LogConVar("tv_delay");
+        LogConVar("tv_transmitall");
+        LogConVar("tv_snapshotrate");
+        LogConVar("tv_record_immediate");
+        LogConVar("tv_enable");
+        LogConVar("tv_autorecord");
+    }
+
+    private void LogConVar(string name)
+    {
         try
         {
-            var delayVar = ConVar.Find("tv_delay");
-            var transmitVar = ConVar.Find("tv_transmitall");
-            var snapVar = ConVar.Find("tv_snapshotrate");
-            var immediateVar = ConVar.Find("tv_record_immediate");
-            Log($"GOTV cvar check — tv_delay={delayVar?.GetPrimitiveValue<int>()}, tv_transmitall={transmitVar?.GetPrimitiveValue<int>()}, tv_snapshotrate={snapVar?.GetPrimitiveValue<int>()}, tv_record_immediate={immediateVar?.GetPrimitiveValue<int>()}");
+            var cv = ConVar.Find(name);
+            if (cv == null) { Log($"  {name} = NOT FOUND"); return; }
+            // Try int first, then bool, then float, then string
+            try { Log($"  {name} = {cv.GetPrimitiveValue<int>()} (int)"); return; } catch { }
+            try { Log($"  {name} = {cv.GetPrimitiveValue<bool>()} (bool)"); return; } catch { }
+            try { Log($"  {name} = {cv.GetPrimitiveValue<float>()} (float)"); return; } catch { }
+            Log($"  {name} = (unknown type)");
         }
         catch (Exception ex)
         {
-            Log($"ConVar diagnostic failed: {ex.Message}");
+            Log($"  {name} = ERROR: {ex.Message}");
         }
     }
 
@@ -428,22 +450,53 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         Server.NextFrame(() =>
         {
             // Force tv_delay 0 immediately before recording as a safety net.
-            // Something on this server overrides tv_delay to 30 after map start.
-            // tv_delay > 0 prevents tick data from being written to the demo file.
             Server.ExecuteCommand("tv_delay 0");
             Server.ExecuteCommand($"tv_record {CurrentDemoName}");
             Log($"Started recording: {demoFileName} (Match: {_matchFolder})");
 
-            // Log actual cvar values at recording start
-            try
-            {
-                var delayVar = ConVar.Find("tv_delay");
-                Log($"At recording start — tv_delay={delayVar?.GetPrimitiveValue<int>()}");
-            }
-            catch { }
+            // Dump tv_status to server console for manual inspection
+            Server.ExecuteCommand("tv_status");
+
+            // Log all GOTV cvars at recording start
+            Log("GOTV cvars at recording start:");
+            LogConVar("tv_delay");
+            LogConVar("tv_enable");
+            LogConVar("tv_transmitall");
+            LogConVar("tv_snapshotrate");
+            LogConVar("tv_record_immediate");
+            LogConVar("tv_autorecord");
+            LogConVar("tv_maxrate");
         });
 
         IsRecording = true;
+
+        // Monitor demo file size every 60s during recording
+        string monitorDemoName = CurrentDemoName;
+        string monitorGameDir = _gameDirectory;
+        _sizeMonitorTimer = AddTimer(60.0f, () =>
+        {
+            if (!IsRecording) return;
+            string demoPath = Path.Combine(monitorGameDir, "csgo", $"{monitorDemoName}.dem");
+            if (!File.Exists(demoPath))
+                demoPath = Path.Combine(monitorGameDir, $"{monitorDemoName}.dem");
+
+            if (File.Exists(demoPath))
+            {
+                try
+                {
+                    long size = new FileInfo(demoPath).Length;
+                    Log($"[SIZE MONITOR] {monitorDemoName}.dem = {size / 1024}KB ({size / (1024 * 1024.0):F2}MB)");
+                }
+                catch (Exception ex)
+                {
+                    Log($"[SIZE MONITOR] Error reading {monitorDemoName}.dem: {ex.Message}");
+                }
+            }
+            else
+            {
+                Log($"[SIZE MONITOR] {monitorDemoName}.dem NOT FOUND on disk yet");
+            }
+        }, TimerFlags.REPEAT);
     }
 
     private void OnMapStart(string mapName)
