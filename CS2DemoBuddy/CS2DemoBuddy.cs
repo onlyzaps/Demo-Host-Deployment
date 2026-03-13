@@ -453,11 +453,14 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         _isRecording = true;
 
-        // Frame 1: Enable HLTV and set immediate recording mode
+        // Frame 1: Enable HLTV, set quality/voice cvars
         Server.NextFrame(() =>
         {
             Server.ExecuteCommand("tv_enable 1");
             Server.ExecuteCommand("tv_record_immediate 1");
+            Server.ExecuteCommand("tv_snapshotrate 64");
+            Server.ExecuteCommand("tv_transmitall 1");
+            Server.ExecuteCommand("tv_relayvoice 1");
 
             // Frame 2: Actually start recording (engine needs a tick to process HLTV enable)
             Server.NextFrame(() =>
@@ -627,7 +630,8 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     {
         Log($"GOTV diagnostics ({context}):");
         foreach (var name in new[] { "tv_enable", "tv_delay", "tv_autorecord",
-                                      "tv_record_immediate", "tv_transmitall", "tv_maxrate" })
+                                      "tv_record_immediate", "tv_transmitall",
+                                      "tv_relayvoice", "tv_snapshotrate", "tv_maxrate" })
         {
             try
             {
@@ -861,6 +865,18 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             {
                 Log($"Uploaded {fileName} successfully.");
                 HistoryTracker?.RemoveDemo(fileName);
+                try
+                {
+                    if (File.Exists(filePath))
+                    {
+                        File.Delete(filePath);
+                        Log($"Deleted local demo: {fileName}");
+                    }
+                }
+                catch (Exception delEx)
+                {
+                    Log($"Failed to delete local demo {fileName}: {delEx.Message}");
+                }
             }
             else
             {

@@ -156,15 +156,10 @@
     .download-btn { display: inline-block; padding: 8px 16px; background-color: var(--accent-color); color: #000; text-decoration: none; font-weight: 600; font-size: 13px; border-radius: 4px; transition: all 0.2s; }
     .download-btn:hover { background-color: #fff; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0, 191, 255, 0.2); }
 
-    .match-row { cursor: pointer; transition: background-color 0.2s; }
-    .match-row:hover td { background-color: rgba(0, 191, 255, 0.05) !important; }
-    .expand-cell { width: 40px; text-align: center; user-select: none; }
-    .expand-icon { display: inline-block; font-size: 10px; color: var(--accent-color); transition: transform 0.2s; }
-    .expand-icon.expanded { transform: rotate(90deg); }
-    .round-row { background-color: rgba(0, 0, 0, 0.15); }
-    .round-row td:first-child { padding-left: 50px; }
-    .round-label { color: var(--accent-color); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .demo-table tbody tr { transition: background-color 0.2s; }
+    .demo-table tbody tr:hover td { background-color: rgba(0, 191, 255, 0.05) !important; }
     .map-subtitle { font-size: 0.75rem; color: var(--text-secondary); font-weight: normal; margin-top: 2px; }
+    .local-tz { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 
     .log-viewer { background: rgba(0, 0, 0, 0.6); color: #0f0; font-family: monospace; padding: 20px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-x: auto; height: 100%; border-radius: 4px; border: 1px solid var(--glass-border); }
 
@@ -376,132 +371,77 @@
         }
 
         const mainContent = document.getElementById('main-content');
-        mainContent.innerHTML = '<div style="text-align:center; padding: 40px;">Loading matches...</div>';
+        mainContent.innerHTML = '<div style="text-align:center; padding: 40px;">Loading demos...</div>';
 
         try {
-            const res = await fetch(`/api/servers/${encodeURIComponent(server)}/dates/${encodeURIComponent(date)}/matches`);
-            const matches = await res.json();
+            const res = await fetch(`/api/servers/${encodeURIComponent(server)}/dates/${encodeURIComponent(date)}/demos`);
+            const demos = await res.json();
             
-            if(matches.length === 0) {
-                mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:var(--text-secondary);">No match demos found for this date.</div>';
+            if(demos.length === 0) {
+                mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:var(--text-secondary);">No demos found for this date.</div>';
                 return;
             }
+
+            const tzName = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local';
 
             let html = `
             <table class="demo-table">
                 <thead>
                     <tr>
-                        <th style="width:40px;"></th>
-                        <th>Map / Match</th>
-                        <th>Rounds</th>
-                        <th>Time Recorded</th>
-                        <th>Total Size</th>
+                        <th>Map</th>
+                        <th>Filename</th>
+                        <th>Recorded (${escapeHtml(tzName)})</th>
+                        <th>Size</th>
                         <th>Download</th>
                     </tr>
                 </thead>
                 <tbody>
             `;
 
-            matches.forEach((match, mi) => {
-                const matchId = 'match-' + mi;
-                let matchDisplay, matchTime;
+            demos.forEach((demo) => {
+                const parsed = parseDemoFilename(demo.name);
+                const mapDisplay = formatMapDisplay(parsed.mapName);
+                const localTime = formatLocalTime(demo.date, date, parsed.time);
 
-                if (match.matchFolder) {
-                    const parsed = parseMatchFolder(match.matchFolder);
-                    matchDisplay = formatMapDisplay(parsed.mapName);
-                    matchTime = formatUtcTime(parsed.time);
-                } else if (match.rounds.length > 0) {
-                    const parsed = parseRoundFilename(match.rounds[0].name);
-                    matchDisplay = formatMapDisplay(parsed.mapName);
-                    matchTime = new Date(match.date).toLocaleTimeString();
-                } else {
-                    matchDisplay = { full: 'Unknown', raw: '' };
-                    matchTime = '';
-                }
-
-                // Match header row (collapsed by default)
                 html += `
-                    <tr class="match-row" onclick="toggleMatch('${matchId}')">
-                        <td class="expand-cell"><span class="expand-icon" id="icon-${matchId}">&#9654;</span></td>
-                        <td style="font-weight:bold; color:#fff;">${escapeHtml(matchDisplay.full)}<div class="map-subtitle">${escapeHtml(match.matchFolder || match.rounds[0]?.name || '')}</div></td>
-                        <td>${match.roundCount} round${match.roundCount !== 1 ? 's' : ''}</td>
-                        <td>${matchTime}</td>
-                        <td style="font-family:monospace;">${escapeHtml(match.totalSize)}</td>
-                        <td></td>
+                    <tr>
+                        <td style="font-weight:bold; color:#fff;">${escapeHtml(mapDisplay.full)}</td>
+                        <td><div class="map-subtitle">${escapeHtml(demo.name)}</div></td>
+                        <td>${localTime}</td>
+                        <td style="font-family:monospace;">${escapeHtml(demo.size)}</td>
+                        <td><a href="/demos/${encodeURI(demo.path)}" download class="download-btn">Download</a></td>
                     </tr>
                 `;
-
-                // Round rows (hidden by default)
-                match.rounds.forEach((round) => {
-                    const rParsed = parseRoundFilename(round.name);
-                    const roundLabel = rParsed.roundNum ? 'Round ' + rParsed.roundNum : round.name.replace('.dem','');
-                    const roundTime = rParsed.time ? formatUtcTime(rParsed.time) : new Date(round.date).toLocaleTimeString();
-
-                    html += `
-                        <tr class="round-row ${matchId}" style="display:none;">
-                            <td></td>
-                            <td><span class="round-label">${escapeHtml(roundLabel)}</span></td>
-                            <td></td>
-                            <td>${roundTime}</td>
-                            <td style="font-family:monospace;">${escapeHtml(round.size)}</td>
-                            <td><a href="/demos/${encodeURI(round.path)}" download class="download-btn">Download .dem</a></td>
-                        </tr>
-                    `;
-                });
             });
 
             html += `</tbody></table>`;
             mainContent.innerHTML = html;
         } catch(e) {
-            mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:red;">Error loading demos. Internal server error.</div>';
+            mainContent.innerHTML = '<div style="text-align:center; padding: 40px; color:red;">Error loading demos.</div>';
         }
     }
 
-    function toggleMatch(matchId) {
-        const rows = document.querySelectorAll('.' + matchId);
-        const icon = document.getElementById('icon-' + matchId);
-        const isHidden = rows.length > 0 && rows[0].style.display === 'none';
-
-        rows.forEach(row => {
-            row.style.display = isHidden ? '' : 'none';
-        });
-
-        if (icon) {
-            icon.classList.toggle('expanded', isHidden);
-        }
-    }
-
-    function parseMatchFolder(folder) {
-        // folder like "de_dust2-143025" or "cs_office-143025"
-        const lastDash = folder.lastIndexOf('-');
-        if (lastDash === -1) return { mapName: folder, time: '' };
-        return {
-            mapName: folder.substring(0, lastDash),
-            time: folder.substring(lastDash + 1)
-        };
-    }
-
-    function parseRoundFilename(filename) {
-        // filename like "de_dust2_round_3_143025.dem"
+    function parseDemoFilename(filename) {
+        // filename like "de_dust2_143025.dem" or "de_dust2_round_3_143025.dem" (legacy)
         const clean = filename.replace('.dem', '');
+        // Check for legacy round format
         const roundIdx = clean.indexOf('_round_');
-        if (roundIdx === -1) {
-            // Legacy format: mapname_MMddyy_HHmmss
-            let parts = clean.split('_');
-            let displayMap = parts.length > 2 ? parts.slice(0, -2).join('_') : clean;
-            return { mapName: displayMap, roundNum: null, time: '' };
+        if (roundIdx !== -1) {
+            const mapName = clean.substring(0, roundIdx);
+            const rest = clean.substring(roundIdx + 7);
+            const underscoreIdx = rest.indexOf('_');
+            const time = underscoreIdx !== -1 ? rest.substring(underscoreIdx + 1) : '';
+            return { mapName, time };
         }
-        const mapName = clean.substring(0, roundIdx);
-        const rest = clean.substring(roundIdx + 7); // after '_round_'
-        const underscoreIdx = rest.indexOf('_');
-        if (underscoreIdx === -1) {
-            return { mapName, roundNum: parseInt(rest) || null, time: '' };
+        // Current format: mapname_HHmmss  (last 6 chars are time if all digits)
+        const lastUnderscore = clean.lastIndexOf('_');
+        if (lastUnderscore !== -1) {
+            const possibleTime = clean.substring(lastUnderscore + 1);
+            if (/^\d{6}$/.test(possibleTime)) {
+                return { mapName: clean.substring(0, lastUnderscore), time: possibleTime };
+            }
         }
-        return {
-            mapName,
-            roundNum: parseInt(rest.substring(0, underscoreIdx)) || null,
-            time: rest.substring(underscoreIdx + 1)
-        };
+        return { mapName: clean, time: '' };
     }
 
     function formatMapDisplay(mapName) {
@@ -526,10 +466,33 @@
         };
     }
 
-    function formatUtcTime(timeStr) {
-        // "143025" → "14:30:25 UTC"
-        if (timeStr && timeStr.length === 6) {
-            return timeStr.substring(0,2) + ':' + timeStr.substring(2,4) + ':' + timeStr.substring(4,6) + ' UTC';
+    function formatLocalTime(mtime, dateStr, timeStr) {
+        // Prefer the server mtime (ISO string) for accurate timezone conversion
+        if (mtime) {
+            try {
+                const d = new Date(mtime);
+                if (!isNaN(d.getTime())) {
+                    return d.toLocaleString(undefined, {
+                        month: 'short', day: 'numeric',
+                        hour: '2-digit', minute: '2-digit', second: '2-digit',
+                        hour12: true
+                    });
+                }
+            } catch(e) {}
+        }
+        // Fallback: construct a UTC date from the date string + HHmmss time
+        if (timeStr && timeStr.length === 6 && dateStr) {
+            try {
+                const utcStr = dateStr + 'T' + timeStr.substring(0,2) + ':' + timeStr.substring(2,4) + ':' + timeStr.substring(4,6) + 'Z';
+                const d = new Date(utcStr);
+                if (!isNaN(d.getTime())) {
+                    return d.toLocaleString(undefined, {
+                        month: 'short', day: 'numeric',
+                        hour: '2-digit', minute: '2-digit', second: '2-digit',
+                        hour12: true
+                    });
+                }
+            } catch(e) {}
         }
         return timeStr || '';
     }

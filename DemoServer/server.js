@@ -103,23 +103,42 @@ app.get('/api/servers/:server/dates', (req, res) => {
   }
 });
 
-// Get all demos for a given server and date
+// Get all demos for a given server and date (flattened from all match folders)
 app.get('/api/servers/:server/dates/:date/demos', (req, res) => {
-  const datePath = path.join(storageDir, req.params.server, req.params.date);
+  const serverDir = req.params.server.replace(/[^a-zA-Z0-9_\-\.]/g, '');
+  const dateDir = req.params.date.replace(/[^0-9\-]/g, '');
+  const datePath = path.join(storageDir, serverDir, dateDir);
   if (!fs.existsSync(datePath)) return res.json([]);
 
   try {
     let allDemos = [];
-    const files = fs.readdirSync(datePath);
-    for (const file of files) {
-      if (file.endsWith('.dem')) {
-        const stats = fs.statSync(path.join(datePath, file));
+    const entries = fs.readdirSync(datePath);
+    for (const entry of entries) {
+      const entryPath = path.join(datePath, entry);
+      const stat = fs.statSync(entryPath);
+
+      if (entry.endsWith('.dem') && stat.isFile()) {
+        // Flat demo at date level
         allDemos.push({
-          name: file,
-          path: `${req.params.server}/${req.params.date}/${file}`,
-          size: (stats.size / (1024 * 1024)).toFixed(2) + ' MB',
-          date: stats.mtime
+          name: entry,
+          path: `${serverDir}/${dateDir}/${entry}`,
+          size: (stat.size / (1024 * 1024)).toFixed(2) + ' MB',
+          date: stat.mtime
         });
+      } else if (stat.isDirectory()) {
+        // Match subfolder — collect demos inside
+        const subFiles = fs.readdirSync(entryPath);
+        for (const sf of subFiles) {
+          if (sf.endsWith('.dem')) {
+            const sfStats = fs.statSync(path.join(entryPath, sf));
+            allDemos.push({
+              name: sf,
+              path: `${serverDir}/${dateDir}/${entry}/${sf}`,
+              size: (sfStats.size / (1024 * 1024)).toFixed(2) + ' MB',
+              date: sfStats.mtime
+            });
+          }
+        }
       }
     }
     res.json(allDemos.sort((a, b) => new Date(b.date) - new Date(a.date)));
