@@ -601,6 +601,14 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         IsRecording = false;
         _matchFolder = "";
         _matchDate = "";
+
+        // Safety net: kill any orphaned timers in case OnMapEnd didn't fire
+        _sizeMonitorTimer?.Kill();
+        _sizeMonitorTimer = null;
+        _playerMonitorTimer?.Kill();
+        _playerMonitorTimer = null;
+        _emptyServerSince = null;
+
         Log($"Map started: {mapName}");
 
         // NO cvar changes here — GOTV settings are applied once at plugin load.
