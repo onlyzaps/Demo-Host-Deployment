@@ -1,6 +1,5 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
-using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Timers;
 using System.Net.Http.Headers;
@@ -123,7 +122,7 @@ public class DemoHistoryTracker
 public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 {
     public override string ModuleName => "CS2DemoBuddy";
-    public override string ModuleVersion => "4.0.0";
+    public override string ModuleVersion => "5.0.0";
     public override string ModuleAuthor => "VinSix";
 
     public CS2DemoBuddyConfig Config { get; set; } = new();
@@ -132,22 +131,28 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private string StorageServerName => $"DBS_{Config.ServerName}";
 
-    private string CurrentDemoName = "";
-    private bool IsRecording = false;
+    // ── Recording state ────────────────────────────────────────────────
+    private string _currentDemoName = "";
+    private bool _isRecording = false;
     private string _matchFolder = "";
     private string _matchDate = "";
-    private const long MinDemoSizeBytes = 1_000_000; // 1MB — skip junk demos
+    private string _demoDir = "";          // resolved once at load
 
-    private FileSystemWatcher? _watcher;
-    private List<string> _watcherCreatedFiles = new();
-    private readonly object _watcherLock = new();
+    // ── Timers ─────────────────────────────────────────────────────────
+    private CounterStrikeSharp.API.Modules.Timers.Timer? _sizeMonitorTimer;
+    private CounterStrikeSharp.API.Modules.Timers.Timer? _playerMonitorTimer;
+    private DateTime? _emptyServerSince;
+
+    // ── Upload / GC plumbing ───────────────────────────────────────────
+    private const long MinDemoSizeBytes = 1_000_000; // 1 MB
     private readonly HashSet<string> _pendingFiles = new();
     private readonly object _pendingLock = new();
     private CancellationTokenSource? _inventoryCts;
     private string _gameDirectory = "";
-    private CounterStrikeSharp.API.Modules.Timers.Timer? _sizeMonitorTimer;
-    private CounterStrikeSharp.API.Modules.Timers.Timer? _playerMonitorTimer;
-    private DateTime? _emptyServerSince;
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Logging
+    // ═══════════════════════════════════════════════════════════════════
 
     private void Log(string message)
     {
@@ -197,132 +202,118 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         catch { }
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    //  Config
+    // ═══════════════════════════════════════════════════════════════════
+
     public void OnConfigParsed(CS2DemoBuddyConfig config)
     {
         if (config.ServerName.Contains(" "))
-        {
             config.ServerName = config.ServerName.Replace(" ", "_");
-        }
         Config = config;
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Load / Unload
+    // ═══════════════════════════════════════════════════════════════════
 
     public override void Load(bool hotReload)
     {
         Log($"===== CS2DemoBuddy v{ModuleVersion} LOADING =====");
 
-        // Cache game directory for background thread access
         _gameDirectory = Server.GameDirectory;
+        _demoDir = Path.Combine(_gameDirectory, "csgo");
 
         string configDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../configs/plugins/CS2DemoBuddy"));
         if (!Directory.Exists(configDir)) Directory.CreateDirectory(configDir);
         HistoryTracker = new DemoHistoryTracker(configDir, Log);
 
-        SetupFileWatcher();
-
-        // Clear any stuck recording from a previous session or crash
+        // Clear any stuck recording from a previous session / crash
         Server.ExecuteCommand("tv_stoprecord");
 
-        // Apply GOTV settings once at load — not per-round or per-map
-        ApplyGotvSettings();
+        // ── This plugin does NOT set any GOTV cvars. ──
+        // You MUST configure these in your server.cfg or launch params:
+        //   +tv_enable 1
+        //   tv_delay 0
+        //   tv_autorecord 0
+        // The engine/gamemode configs reset cvars on every map load,
+        // overriding anything we set here. server.cfg runs AFTER
+        // gamemode configs, so values set there will stick.
+
+        // Log current GOTV cvar values for diagnostics
+        LogGotvDiagnostics("Plugin load");
 
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
 
-        // Per-match recording: start on first non-warmup round, record
-        // continuously until map ends. CS2 engine only flushes .dem files
-        // to disk on map change — per-round recording is not possible.
+        // ── Recording trigger: first non-warmup round with humans ──
         RegisterEventHandler<EventRoundStart>((@event, info) =>
         {
-            if (!IsRecording)
+            if (!_isRecording)
             {
                 try
                 {
                     if (IsWarmup())
                     {
-                        Log("RoundStart during warmup — skipping recording.");
+                        Log("RoundStart during warmup — skipping.");
                         return HookResult.Continue;
                     }
-
-                    var players = Utilities.GetPlayers();
-                    int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
-                    if (humanCount > 0)
+                    int humans = CountHumans();
+                    if (humans > 0)
                     {
-                        Log($"RoundStart with {humanCount} human(s). Starting match recording...");
+                        Log($"RoundStart with {humans} human(s) — starting recording.");
                         StartRecording();
                     }
                 }
-                catch (Exception ex)
-                {
-                    Log($"RoundStart handler error: {ex.Message}");
-                }
+                catch (Exception ex) { Log($"RoundStart error: {ex.Message}"); }
             }
             return HookResult.Continue;
         });
 
-        // No RoundEnd stop — CS2 only writes .dem files on map change.
-        // Recording runs continuously from first live round until OnMapEnd.
-
-        // Safety net: log match end (recording continues until OnMapEnd)
+        // ── Log match end (recording continues until map change) ──
         RegisterEventHandler<EventCsWinPanelMatch>((@event, info) =>
         {
-            if (IsRecording)
-            {
-                Log("CsWinPanelMatch — match ended, recording continues until map change.");
-            }
+            if (_isRecording)
+                Log("Match ended — recording continues until map change.");
             return HookResult.Continue;
         });
 
-        // When a player connects, start recording if we aren't already.
-        // This handles resuming after an empty-server stop without waiting
-        // for the next RoundStart.
+        // ── Resume after empty-server stop ──
         RegisterEventHandler<EventPlayerConnectFull>((@event, info) =>
         {
-            if (!IsRecording)
+            if (!_isRecording)
             {
                 AddTimer(3.0f, () =>
                 {
-                    if (IsRecording) return;
-                    if (IsWarmup()) return;
-                    try
+                    if (_isRecording || IsWarmup()) return;
+                    int humans = CountHumans();
+                    if (humans > 0)
                     {
-                        var players = Utilities.GetPlayers();
-                        int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
-                        if (humanCount > 0)
-                        {
-                            Log($"Player connected with {humanCount} human(s). Starting fresh recording...");
-                            StartRecording();
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"PlayerConnect recording start error: {ex.Message}");
+                        Log($"Player connected ({humans} human(s)) — starting fresh recording.");
+                        StartRecording();
                     }
                 });
             }
             return HookResult.Continue;
         });
 
-        // If loaded mid-round (hot reload), start recording immediately
+        // ── Hot reload: pick up mid-match ──
         if (hotReload)
         {
             AddTimer(1.0f, () =>
             {
-                if (!IsRecording && !IsWarmup())
+                if (!_isRecording && !IsWarmup() && CountHumans() > 0)
                 {
-                    var players = Utilities.GetPlayers();
-                    int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
-                    if (humanCount > 0)
-                    {
-                        Log($"Hot reload detected with {humanCount} human(s). Starting recording...");
-                        StartRecording();
-                    }
+                    Log($"Hot reload — starting recording.");
+                    StartRecording();
                 }
             });
         }
 
+        // ── GC every 45 minutes ──
         AddTimer(2700.0f, RunGarbageCollection, TimerFlags.REPEAT);
 
-        // Periodic source-file inventory reporting
+        // ── Periodic inventory reporting ──
         _inventoryCts = new CancellationTokenSource();
         _ = RunInventoryLoop(_inventoryCts.Token);
 
@@ -333,440 +324,284 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     {
         Log($"===== CS2DemoBuddy v{ModuleVersion} UNLOADING =====");
 
-        // Stop any active recording
-        if (IsRecording)
+        if (_isRecording)
         {
             Server.ExecuteCommand("tv_stoprecord");
-            IsRecording = false;
+            _isRecording = false;
         }
 
-        // Dispose FileSystemWatcher
-        if (_watcher != null)
-        {
-            _watcher.EnableRaisingEvents = false;
-            _watcher.Dispose();
-            _watcher = null;
-        }
+        _inventoryCts?.Cancel();
+        _inventoryCts?.Dispose();
+        _inventoryCts = null;
 
-        // Clear watcher state
-        lock (_watcherLock)
-        {
-            _watcherCreatedFiles.Clear();
-        }
+        KillTimers();
 
-        // Cancel inventory loop
-        if (_inventoryCts != null)
-        {
-            _inventoryCts.Cancel();
-            _inventoryCts.Dispose();
-            _inventoryCts = null;
-        }
-
-        // Kill monitor timers
-        _sizeMonitorTimer?.Kill();
-        _sizeMonitorTimer = null;
-        _playerMonitorTimer?.Kill();
-        _playerMonitorTimer = null;
-
-        CurrentDemoName = "";
+        _currentDemoName = "";
         HistoryTracker = null;
 
         Log($"===== CS2DemoBuddy v{ModuleVersion} UNLOADED =====");
     }
 
-    private void ApplyGotvSettings()
+    // ═══════════════════════════════════════════════════════════════════
+    //  Map lifecycle
+    // ═══════════════════════════════════════════════════════════════════
+
+    private void OnMapStart(string mapName)
     {
-        // NEVER change GOTV cvars while recording — changing tv_delay (or most
-        // tv_* cvars) mid-recording resets the GOTV buffer and produces a
-        // ~107KB header-only demo file with zero tick data.
-        if (IsRecording)
-        {
-            Log("Skipping ApplyGotvSettings — recording is active.");
-            return;
-        }
+        // Reset state — OnMapEnd already stopped recording, but this is
+        // a safety net in case OnMapEnd didn't fire.
+        _isRecording = false;
+        _matchFolder = "";
+        _matchDate = "";
+        KillTimers();
 
-        Log("Applying GOTV settings...");
-
-        // IMPORTANT: tv_enable is a startup-only cvar in CS2. This command
-        // alone will NOT spawn the GOTV bot if it wasn't enabled at server
-        // launch. You MUST add +tv_enable 1 to your server startup command
-        // line (or server.cfg) for GOTV to work.
-        Server.ExecuteCommand("tv_enable 1");
-
-        // Zero delay — demo data is written immediately to the GOTV buffer
-        Server.ExecuteCommand("tv_delay 0");
-
-        // tv_transmitall controls what is sent over the NETWORK to live
-        // GOTV spectator clients — NOT what tv_record writes to disk.
-        // tv_record captures the full server state (all players, all ticks)
-        // regardless of this setting. With 20+ players, transmitall 1
-        // overwhelms the GOTV relay and produces ~100KB junk demo files.
-        // All major plugins (MatchZy, Get5) use 0. Demos still support
-        // switching between any player's POV.
-        Server.ExecuteCommand("tv_transmitall 0");
-
-        // Immediate file writing — helps ensure demo is flushed on map change
-        Server.ExecuteCommand("tv_record_immediate 1");
-
-        Server.ExecuteCommand("tv_relayvoice 1");
-
-        // Quality / rate settings
-        Server.ExecuteCommand("tv_snapshotrate 32");
-        Server.ExecuteCommand("tv_maxrate 0");
-        Server.ExecuteCommand("tv_deltacache -1");
-
-        // Autorecord off — we manage recording ourselves
-        Server.ExecuteCommand("tv_autorecord 0");
-
-        Log("GOTV settings applied: tv_enable 1, tv_delay 0, tv_transmitall 0, tv_record_immediate 1, tv_snapshotrate 32, tv_maxrate 0");
-
-        // Diagnostic: log actual ConVar values to verify nothing is overriding us
-        LogConVar("tv_delay");
-        LogConVar("tv_transmitall");
-        LogConVar("tv_snapshotrate");
-        LogConVar("tv_record_immediate");
-        LogConVar("tv_enable");
-        LogConVar("tv_autorecord");
+        Log($"Map started: {mapName}");
+        LogGotvDiagnostics("Map start");
     }
 
-    private void LogConVar(string name)
+    private void OnMapEnd()
     {
-        try
-        {
-            var cv = ConVar.Find(name);
-            if (cv == null) { Log($"  {name} = NOT FOUND"); return; }
-            // Try int first, then bool, then float, then string
-            try { Log($"  {name} = {cv.GetPrimitiveValue<int>()} (int)"); return; } catch { }
-            try { Log($"  {name} = {cv.GetPrimitiveValue<bool>()} (bool)"); return; } catch { }
-            try { Log($"  {name} = {cv.GetPrimitiveValue<float>()} (float)"); return; } catch { }
-            Log($"  {name} = (unknown type)");
-        }
-        catch (Exception ex)
-        {
-            Log($"  {name} = ERROR: {ex.Message}");
-        }
+        StopAndUploadDemo("Map ended");
     }
 
-    private void SetupFileWatcher()
-    {
-        try
-        {
-            string watchRoot = Path.Combine(Server.GameDirectory, "csgo");
-            if (!Directory.Exists(watchRoot))
-                watchRoot = Server.GameDirectory;
+    // ═══════════════════════════════════════════════════════════════════
+    //  Recording — start / stop
+    // ═══════════════════════════════════════════════════════════════════
 
-            _watcher = new FileSystemWatcher(watchRoot);
-            _watcher.Filter = "*.dem";
-            _watcher.IncludeSubdirectories = true;
-            _watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime | NotifyFilters.Size;
-            _watcher.Created += (sender, e) =>
+    private void StartRecording()
+    {
+        if (_isRecording) return;
+
+        string mapName = Server.MapName;
+        string ts = DateTime.UtcNow.ToString("HHmmss");
+        _matchFolder = $"{mapName}-{ts}";
+        _matchDate = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        _currentDemoName = $"{mapName}_{ts}";
+
+        string demoFileName = $"{_currentDemoName}.dem";
+        HistoryTracker?.AddDemo(demoFileName, StorageServerName, _matchFolder, _matchDate);
+
+        _isRecording = true;
+
+        Server.NextFrame(() =>
+        {
+            Server.ExecuteCommand($"tv_record {_currentDemoName}");
+            Log($"▶ Recording started: {demoFileName}  (folder: {_matchFolder})");
+            Server.ExecuteCommand("tv_status");
+            LogGotvDiagnostics("Recording start");
+        });
+
+        // ── Size monitor: log file size every 60 s ──
+        KillTimers();
+        string monitorName = _currentDemoName;
+        string monitorDir = _demoDir;
+        _sizeMonitorTimer = AddTimer(60.0f, () =>
+        {
+            if (!_isRecording) return;
+            string path = Path.Combine(monitorDir, $"{monitorName}.dem");
+            if (File.Exists(path))
             {
-                lock (_watcherLock) { _watcherCreatedFiles.Add(e.FullPath); }
-                Log($"Demo file detected: {e.FullPath}");
-            };
-            _watcher.EnableRaisingEvents = true;
-            Log($"FileSystemWatcher active on {watchRoot}");
-        }
-        catch (Exception ex)
+                try
+                {
+                    long sz = new FileInfo(path).Length;
+                    Log($"[SIZE] {monitorName}.dem = {sz / 1024}KB ({sz / (1024 * 1024.0):F2}MB)");
+                }
+                catch (Exception ex) { Log($"[SIZE] read error: {ex.Message}"); }
+            }
+            else
+            {
+                Log($"[SIZE] {monitorName}.dem not on disk yet");
+            }
+        }, TimerFlags.REPEAT);
+
+        // ── Player monitor: stop after 5 min with 0 humans ──
+        _emptyServerSince = null;
+        _playerMonitorTimer = AddTimer(30.0f, () =>
         {
-            Log($"FileSystemWatcher setup failed: {ex.Message}");
+            if (!_isRecording) return;
+            int humans = CountHumans();
+            if (humans == 0)
+            {
+                if (_emptyServerSince == null)
+                {
+                    _emptyServerSince = DateTime.UtcNow;
+                    Log("0 players — 5-minute empty-server countdown started.");
+                }
+                else if ((DateTime.UtcNow - _emptyServerSince.Value).TotalSeconds >= 300)
+                {
+                    Log("Server empty 5+ min — stopping recording.");
+                    StopAndUploadDemo("Empty server");
+                }
+            }
+            else if (_emptyServerSince != null)
+            {
+                Log($"Player returned ({humans}) — countdown cancelled.");
+                _emptyServerSince = null;
+            }
+        }, TimerFlags.REPEAT);
+    }
+
+    private void StopAndUploadDemo(string reason)
+    {
+        if (!_isRecording) return;
+
+        KillTimers();
+
+        Server.ExecuteCommand("tv_stoprecord");
+        _isRecording = false;
+
+        string demoFileName = $"{_currentDemoName}.dem";
+        string stoppedFolder = _matchFolder;
+        string stoppedDate = _matchDate;
+        Log($"■ Recording stopped ({reason}): {demoFileName}");
+
+        lock (_pendingLock) { _pendingFiles.Add(demoFileName); }
+
+        string gameDir = _gameDirectory;
+        string demoDir = _demoDir;
+
+        Task.Run(async () =>
+        {
+            // CS2 flushes the .dem file when tv_stoprecord runs (or on map change).
+            // Give the engine a moment, then look for it.
+            await Task.Delay(10000);
+
+            string? path = FindDemoFile(demoFileName, demoDir, gameDir);
+
+            if (path == null)
+            {
+                Log($"Demo not found after 10 s, waiting 30 s more...");
+                await Task.Delay(30000);
+                path = FindDemoFile(demoFileName, demoDir, gameDir);
+            }
+
+            if (path == null)
+            {
+                Log($"Demo not found after 40 s, waiting 60 s more...");
+                await Task.Delay(60000);
+                path = FindDemoFile(demoFileName, demoDir, gameDir);
+            }
+
+            if (path == null)
+            {
+                Log($"Could not find {demoFileName} after extended wait — GC will retry.");
+                return;
+            }
+
+            path = await WaitForFileStable(path);
+            if (path == null)
+            {
+                lock (_pendingLock) { _pendingFiles.Remove(demoFileName); }
+                return;
+            }
+
+            long finalSize = new FileInfo(path).Length;
+            Log($"Demo on disk: {demoFileName} = {finalSize / 1024}KB ({finalSize / (1024 * 1024.0):F1}MB)");
+
+            if (finalSize < MinDemoSizeBytes)
+            {
+                Log($"Skipping {demoFileName} — too small. GC will clean up.");
+                HistoryTracker?.RemoveDemo(demoFileName);
+                lock (_pendingLock) { _pendingFiles.Remove(demoFileName); }
+                return;
+            }
+
+            await UploadDemoRoutine(path, demoFileName, null, stoppedFolder, stoppedDate);
+            lock (_pendingLock) { _pendingFiles.Remove(demoFileName); }
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Helpers
+    // ═══════════════════════════════════════════════════════════════════
+
+    private void KillTimers()
+    {
+        _sizeMonitorTimer?.Kill();
+        _sizeMonitorTimer = null;
+        _playerMonitorTimer?.Kill();
+        _playerMonitorTimer = null;
+        _emptyServerSince = null;
+    }
+
+    private int CountHumans()
+    {
+        try
+        {
+            return Utilities.GetPlayers()
+                .Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
         }
+        catch { return 0; }
     }
 
     private bool IsWarmup()
     {
         try
         {
-            var rules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").FirstOrDefault()?.GameRules;
+            var rules = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules")
+                .FirstOrDefault()?.GameRules;
             return rules?.WarmupPeriod ?? false;
         }
-        catch
-        {
-            return false;
-        }
+        catch { return false; }
     }
 
-    private void StartRecording()
+    private void LogGotvDiagnostics(string context)
     {
-        if (IsRecording) return;
-
-        string mapName = Server.MapName;
-        string matchTimestamp = DateTime.UtcNow.ToString("HHmmss");
-        _matchFolder = $"{mapName}-{matchTimestamp}";
-        _matchDate = DateTime.UtcNow.ToString("yyyy-MM-dd");
-
-        CurrentDemoName = $"{mapName}_{matchTimestamp}";
-        string demoFileName = $"{CurrentDemoName}.dem";
-
-        HistoryTracker?.AddDemo(demoFileName, StorageServerName, _matchFolder, _matchDate);
-
-        // Clear watcher list for this recording session
-        lock (_watcherLock) { _watcherCreatedFiles.Clear(); }
-
-        // Kill previous size monitor timer to prevent accumulation across maps
-        _sizeMonitorTimer?.Kill();
-        _sizeMonitorTimer = null;
-
-        Server.NextFrame(() =>
+        Log($"GOTV diagnostics ({context}):");
+        foreach (var name in new[] { "tv_enable", "tv_delay", "tv_autorecord",
+                                      "tv_record_immediate", "tv_transmitall", "tv_maxrate" })
         {
-            Server.ExecuteCommand($"tv_record {CurrentDemoName}");
-            Log($"Started recording: {demoFileName} (Match: {_matchFolder})");
-
-            // Dump tv_status to server console for manual inspection
-            Server.ExecuteCommand("tv_status");
-
-            // Log all GOTV cvars at recording start
-            Log("GOTV cvars at recording start:");
-            LogConVar("tv_delay");
-            LogConVar("tv_enable");
-            LogConVar("tv_transmitall");
-            LogConVar("tv_snapshotrate");
-            LogConVar("tv_record_immediate");
-            LogConVar("tv_autorecord");
-            LogConVar("tv_maxrate");
-        });
-
-        IsRecording = true;
-
-        // Monitor demo file size every 60s during recording
-        string monitorDemoName = CurrentDemoName;
-        string monitorGameDir = _gameDirectory;
-        _sizeMonitorTimer = AddTimer(60.0f, () =>
-        {
-            if (!IsRecording) return;
-            string demoPath = Path.Combine(monitorGameDir, "csgo", $"{monitorDemoName}.dem");
-            if (!File.Exists(demoPath))
-                demoPath = Path.Combine(monitorGameDir, $"{monitorDemoName}.dem");
-
-            if (File.Exists(demoPath))
-            {
-                try
-                {
-                    long size = new FileInfo(demoPath).Length;
-                    Log($"[SIZE MONITOR] {monitorDemoName}.dem = {size / 1024}KB ({size / (1024 * 1024.0):F2}MB)");
-                }
-                catch (Exception ex)
-                {
-                    Log($"[SIZE MONITOR] Error reading {monitorDemoName}.dem: {ex.Message}");
-                }
-            }
-            else
-            {
-                Log($"[SIZE MONITOR] {monitorDemoName}.dem NOT FOUND on disk yet");
-            }
-        }, TimerFlags.REPEAT);
-
-        // Monitor player count — stop recording if server is empty for 5+ minutes
-        _playerMonitorTimer?.Kill();
-        _playerMonitorTimer = null;
-        _emptyServerSince = null;
-        _playerMonitorTimer = AddTimer(30.0f, () =>
-        {
-            if (!IsRecording) return;
             try
             {
-                var players = Utilities.GetPlayers();
-                int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
-                if (humanCount == 0)
-                {
-                    if (_emptyServerSince == null)
-                    {
-                        _emptyServerSince = DateTime.UtcNow;
-                        Log("Server has 0 players — starting 5-minute empty-server countdown.");
-                    }
-                    else if ((DateTime.UtcNow - _emptyServerSince.Value).TotalSeconds >= 300)
-                    {
-                        Log("Server empty for 5+ minutes — stopping recording.");
-                        StopAndUploadDemo();
-                    }
-                }
-                else
-                {
-                    if (_emptyServerSince != null)
-                    {
-                        Log($"Player present — cancelling empty-server countdown ({humanCount} human(s)).");
-                        _emptyServerSince = null;
-                    }
-                }
+                var cv = ConVar.Find(name);
+                if (cv == null) { Log($"  {name} = NOT FOUND"); continue; }
+                try { Log($"  {name} = {cv.GetPrimitiveValue<int>()}"); continue; } catch { }
+                try { Log($"  {name} = {cv.GetPrimitiveValue<bool>()}"); continue; } catch { }
+                try { Log($"  {name} = {cv.GetPrimitiveValue<float>()}"); continue; } catch { }
+                Log($"  {name} = (unknown type)");
             }
-            catch (Exception ex)
-            {
-                Log($"Player monitor error: {ex.Message}");
-            }
-        }, TimerFlags.REPEAT);
-    }
-
-    private void OnMapStart(string mapName)
-    {
-        IsRecording = false;
-        _matchFolder = "";
-        _matchDate = "";
-
-        // Safety net: kill any orphaned timers in case OnMapEnd didn't fire
-        _sizeMonitorTimer?.Kill();
-        _sizeMonitorTimer = null;
-        _playerMonitorTimer?.Kill();
-        _playerMonitorTimer = null;
-        _emptyServerSince = null;
-
-        Log($"Map started: {mapName}");
-
-        // NO cvar changes here — GOTV settings are applied once at plugin load.
-        // Changing cvars on every map start was causing the engine to fight with
-        // the plugin over tv_delay and potentially disrupting the GOTV buffer.
-        // Set your GOTV cvars in server.cfg or launch params instead.
-    }
-
-    private void OnMapEnd()
-    {
-        StopAndUploadDemo();
-    }
-
-    private void StopAndUploadDemo()
-    {
-        if (!IsRecording) return;
-
-        // Kill timers for this recording
-        _sizeMonitorTimer?.Kill();
-        _sizeMonitorTimer = null;
-        _playerMonitorTimer?.Kill();
-        _playerMonitorTimer = null;
-        _emptyServerSince = null;
-
-        Server.ExecuteCommand("tv_stoprecord");
-        IsRecording = false;
-
-        string demoFileName = $"{CurrentDemoName}.dem";
-        string stoppedMatchFolder = _matchFolder;
-        string stoppedMatchDate = _matchDate;
-        Log($"Stopped recording: {demoFileName}");
-
-        // Track this demo as pending so GC won't touch it
-        lock (_pendingLock) { _pendingFiles.Add(demoFileName); }
-
-        // Snapshot watcher results at stop time
-        List<string> watcherSnapshot;
-        lock (_watcherLock) { watcherSnapshot = new List<string>(_watcherCreatedFiles); }
-
-        string gameDir = _gameDirectory;
-        string stoppedDemoName = demoFileName;
-
-        Task.Run(async () =>
-        {
-            // CS2 engine only flushes .dem files to disk on map change,
-            // NOT on tv_stoprecord. StopAndUploadDemo is called from OnMapEnd,
-            // so the file should appear shortly after. Wait then retry.
-            await Task.Delay(30000);
-
-            string? foundPath = FindDemoFile(stoppedDemoName, gameDir, watcherSnapshot);
-
-            // Second attempt — file may still be writing
-            if (foundPath == null)
-            {
-                Log($"First search for {stoppedDemoName} failed, waiting 30s more...");
-                await Task.Delay(30000);
-                foundPath = FindDemoFile(stoppedDemoName, gameDir, null);
-            }
-
-            // Third attempt — extended wait as final fallback
-            if (foundPath == null)
-            {
-                Log($"Second search for {stoppedDemoName} failed, waiting 60s more...");
-                await Task.Delay(60000);
-                foundPath = FindDemoFile(stoppedDemoName, gameDir, null);
-            }
-
-            if (foundPath == null)
-            {
-                Log($"No demo file found for {stoppedDemoName} after extended wait. Will retry during GC.");
-                // Don't remove from pending — GC will find and retry
-                return;
-            }
-
-            // Wait for the file to stop growing (engine may still be flushing)
-            foundPath = await WaitForFileStable(foundPath);
-            if (foundPath == null)
-            {
-                lock (_pendingLock) { _pendingFiles.Remove(stoppedDemoName); }
-                return;
-            }
-
-            var finalSize = new FileInfo(foundPath).Length;
-            if (finalSize < MinDemoSizeBytes)
-            {
-                Log($"Skipping {stoppedDemoName} — too small ({finalSize / 1024}KB). Will be cleaned up by GC.");
-                HistoryTracker?.RemoveDemo(stoppedDemoName);
-                lock (_pendingLock) { _pendingFiles.Remove(stoppedDemoName); }
-                return;
-            }
-
-            Log($"Demo ready: {stoppedDemoName} ({finalSize / (1024 * 1024.0):F1}MB)");
-            await UploadDemoRoutine(foundPath, stoppedDemoName, null, stoppedMatchFolder, stoppedMatchDate);
-            lock (_pendingLock) { _pendingFiles.Remove(stoppedDemoName); }
-        });
-    }
-
-    private string? FindDemoFile(string demoName, string gameDir, List<string>? watcherSnapshot)
-    {
-        // Check watcher results
-        if (watcherSnapshot != null)
-        {
-            if (watcherSnapshot.Count > 0)
-                Log($"Watcher snapshot: {string.Join(", ", watcherSnapshot.Select(Path.GetFileName))}");
-            foreach (var f in watcherSnapshot)
-            {
-                if (File.Exists(f) && Path.GetFileName(f) == demoName) return f;
-            }
+            catch (Exception ex) { Log($"  {name} = ERROR: {ex.Message}"); }
         }
+    }
 
-        // Check late watcher results
-        lock (_watcherLock)
+    // ═══════════════════════════════════════════════════════════════════
+    //  Demo file discovery
+    // ═══════════════════════════════════════════════════════════════════
+
+    private string? FindDemoFile(string demoName, string demoDir, string gameDir)
+    {
+        // Check the two most likely directories
+        foreach (var dir in new[] { demoDir, gameDir }.Distinct())
         {
-            foreach (var f in _watcherCreatedFiles)
-            {
-                if (Path.GetFileName(f) == demoName && File.Exists(f)) return f;
-            }
-        }
-
-        // Direct path check in known directories
-        string[] scanDirs = new[] {
-            Path.Combine(gameDir, "csgo"),
-            gameDir,
-            Environment.CurrentDirectory
-        };
-
-        foreach (var dir in scanDirs.Distinct())
-        {
-            if (!Directory.Exists(dir)) continue;
             string candidate = Path.Combine(dir, demoName);
-            if (File.Exists(candidate)) return candidate;
-        }
-
-        // Recursive search
-        foreach (var dir in scanDirs.Distinct().Take(2))
-        {
-            if (!Directory.Exists(dir)) continue;
-            try
+            if (File.Exists(candidate))
             {
-                var matches = Directory.GetFiles(dir, demoName, SearchOption.AllDirectories);
-                if (matches.Length > 0)
-                {
-                    Log($"Found {demoName} via recursive search: {matches[0]}");
-                    return matches[0];
-                }
+                Log($"Found {demoName} in {dir}");
+                return candidate;
             }
-            catch { }
         }
 
-        // Diagnostic: log what .dem files exist
-        foreach (var dir in scanDirs.Distinct())
+        // Recursive fallback in csgo/
+        try
+        {
+            var matches = Directory.GetFiles(demoDir, demoName, SearchOption.AllDirectories);
+            if (matches.Length > 0)
+            {
+                Log($"Found {demoName} via recursive search: {matches[0]}");
+                return matches[0];
+            }
+        }
+        catch { }
+
+        // Log what .dem files DO exist for troubleshooting
+        foreach (var dir in new[] { demoDir, gameDir }.Distinct())
         {
             if (!Directory.Exists(dir)) continue;
             try
             {
-                var demFiles = Directory.GetFiles(dir, "*.dem");
-                if (demFiles.Length > 0)
-                    Log($"Scan [{dir}]: {demFiles.Length} .dem file(s): {string.Join(", ", demFiles.Select(Path.GetFileName).Take(10))}");
+                var files = Directory.GetFiles(dir, "*.dem");
+                if (files.Length > 0)
+                    Log($"  [{dir}]: {string.Join(", ", files.Select(Path.GetFileName).Take(10))}");
             }
             catch { }
         }
@@ -776,65 +611,53 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private async Task<string?> WaitForFileStable(string filePath)
     {
-        // Poll the file size every 5 seconds. Once it stops changing for 2 consecutive
-        // checks (10 seconds of no growth), the engine is done writing.
-        const int maxAttempts = 24; // 2 minutes max
+        const int maxAttempts = 24; // 2 minutes
         long lastSize = -1;
         int stableCount = 0;
 
         for (int i = 0; i < maxAttempts; i++)
         {
             await Task.Delay(5000);
-
             if (!File.Exists(filePath))
             {
-                Log($"File disappeared while waiting: {Path.GetFileName(filePath)}");
+                Log($"File disappeared: {Path.GetFileName(filePath)}");
                 return null;
             }
 
             try
             {
-                long currentSize = new FileInfo(filePath).Length;
-                if (currentSize == lastSize && currentSize > 0)
+                long sz = new FileInfo(filePath).Length;
+                if (sz == lastSize && sz > 0)
                 {
-                    stableCount++;
-                    if (stableCount >= 2)
+                    if (++stableCount >= 2)
                     {
-                        Log($"File stable at {currentSize / (1024 * 1024.0):F1}MB after {(i + 1) * 5}s.");
+                        Log($"File stable at {sz / (1024 * 1024.0):F1}MB after {(i + 1) * 5}s.");
                         return filePath;
                     }
                 }
-                else
-                {
-                    stableCount = 0;
-                }
-                lastSize = currentSize;
+                else { stableCount = 0; }
+                lastSize = sz;
             }
-            catch
-            {
-                stableCount = 0;
-            }
+            catch { stableCount = 0; }
         }
 
-        // Timed out but file exists — upload what we have
-        Log($"File size did not stabilize after 2 minutes, uploading anyway ({lastSize / (1024 * 1024.0):F1}MB).");
+        Log($"File did not stabilize after 2 min — uploading anyway ({lastSize / (1024 * 1024.0):F1}MB).");
         return File.Exists(filePath) ? filePath : null;
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Garbage collection
+    // ═══════════════════════════════════════════════════════════════════
 
     private void RunGarbageCollection()
     {
         Log("Running garbage collection...");
-        string[] possibleDirs = new[] {
-            Path.Combine(_gameDirectory, "csgo"),
-            _gameDirectory,
-            Environment.CurrentDirectory
-        }.Distinct().ToArray();
+        string[] dirs = new[] { _demoDir, _gameDirectory }.Distinct().ToArray();
 
-        // Snapshot pending files so we don't delete anything mid-upload
-        HashSet<string> pendingSnapshot;
-        lock (_pendingLock) { pendingSnapshot = new HashSet<string>(_pendingFiles); }
+        HashSet<string> pending;
+        lock (_pendingLock) { pending = new HashSet<string>(_pendingFiles); }
 
-        foreach (var dir in possibleDirs)
+        foreach (var dir in dirs)
         {
             if (!Directory.Exists(dir)) continue;
             try
@@ -842,26 +665,20 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 foreach (var filePath in Directory.GetFiles(dir, "*.dem"))
                 {
                     string fileName = Path.GetFileName(filePath);
+                    if (_isRecording && fileName == $"{_currentDemoName}.dem") continue;
+                    if (pending.Contains(fileName)) continue;
 
-                    // Skip the demo currently being recorded
-                    if (IsRecording && fileName == $"{CurrentDemoName}.dem") continue;
-
-                    // Skip demos currently being stabilized or uploaded
-                    if (pendingSnapshot.Contains(fileName)) continue;
-
-                    var (targetServer, gcMatchFolder, gcMatchDate) = HistoryTracker?.GetDemoInfo(fileName) ?? (null, null, null);
-                    if (targetServer == null)
+                    var (srv, folder, date) = HistoryTracker?.GetDemoInfo(fileName) ?? (null, null, null);
+                    if (srv == null)
                     {
-                        // Untracked: either already uploaded or junk — safe to delete
                         Log($"GC: Deleting untracked {fileName}");
                         try { File.Delete(filePath); } catch { }
                     }
                     else
                     {
-                        // Still tracked: upload failed or hasn't been attempted yet
                         Log($"GC: Retrying upload for {fileName}");
                         lock (_pendingLock) { _pendingFiles.Add(fileName); }
-                        _ = RetryUploadAndRelease(filePath, fileName, targetServer, gcMatchFolder, gcMatchDate);
+                        _ = RetryUploadAndRelease(filePath, fileName, srv, folder, date);
                     }
                 }
             }
@@ -869,33 +686,25 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         }
     }
 
-    private async Task RetryUploadAndRelease(string filePath, string fileName, string targetServer, string? matchFolder, string? matchDate)
+    private async Task RetryUploadAndRelease(string filePath, string fileName,
+        string targetServer, string? matchFolder, string? matchDate)
     {
-        try
-        {
-            await UploadDemoRoutine(filePath, fileName, targetServer, matchFolder, matchDate);
-        }
-        finally
-        {
-            lock (_pendingLock) { _pendingFiles.Remove(fileName); }
-        }
+        try { await UploadDemoRoutine(filePath, fileName, targetServer, matchFolder, matchDate); }
+        finally { lock (_pendingLock) { _pendingFiles.Remove(fileName); } }
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Inventory reporting
+    // ═══════════════════════════════════════════════════════════════════
 
     private async Task RunInventoryLoop(CancellationToken ct)
     {
-        // Initial delay before first report
         try { await Task.Delay(15000, ct); } catch (TaskCanceledException) { return; }
 
         while (!ct.IsCancellationRequested)
         {
-            try
-            {
-                await ReportSourceFiles();
-            }
-            catch (Exception ex)
-            {
-                Log($"Inventory report error: {ex.Message}");
-            }
+            try { await ReportSourceFiles(); }
+            catch (Exception ex) { Log($"Inventory error: {ex.Message}"); }
 
             try { await Task.Delay(60000, ct); } catch (TaskCanceledException) { return; }
         }
@@ -903,28 +712,23 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private async Task ReportSourceFiles()
     {
-        string[] scanDirs = new[] {
-            Path.Combine(_gameDirectory, "csgo"),
-            _gameDirectory,
-            Environment.CurrentDirectory
-        }.Distinct().ToArray();
-
+        string[] dirs = new[] { _demoDir, _gameDirectory }.Distinct().ToArray();
         var files = new List<object>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var dir in scanDirs)
+        foreach (var dir in dirs)
         {
             if (!Directory.Exists(dir)) continue;
             try
             {
-                foreach (var filePath in Directory.GetFiles(dir, "*.dem"))
+                foreach (var fp in Directory.GetFiles(dir, "*.dem"))
                 {
-                    string fileName = Path.GetFileName(filePath);
-                    if (!seen.Add(fileName)) continue;
+                    string fn = Path.GetFileName(fp);
+                    if (!seen.Add(fn)) continue;
                     try
                     {
-                        var info = new FileInfo(filePath);
-                        files.Add(new { name = fileName, sizeBytes = info.Length, modified = info.LastWriteTimeUtc.ToString("o") });
+                        var info = new FileInfo(fp);
+                        files.Add(new { name = fn, sizeBytes = info.Length, modified = info.LastWriteTimeUtc.ToString("o") });
                     }
                     catch { }
                 }
@@ -946,7 +750,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         await client.PostAsync(endpoint, content);
     }
 
-    private async Task UploadDemoRoutine(string filePath, string fileName, string? serverNameFallback = null, string? matchFolder = null, string? matchDate = null)
+    // ═══════════════════════════════════════════════════════════════════
+    //  Upload
+    // ═══════════════════════════════════════════════════════════════════
+
+    private async Task UploadDemoRoutine(string filePath, string fileName,
+        string? serverNameFallback = null, string? matchFolder = null, string? matchDate = null)
     {
         if (!File.Exists(filePath)) return;
 
@@ -972,18 +781,18 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
             if (response.IsSuccessStatusCode)
             {
-                Log($"Successfully uploaded {fileName}. File will be cleaned up by GC.");
+                Log($"Uploaded {fileName} successfully.");
                 HistoryTracker?.RemoveDemo(fileName);
             }
             else
             {
-                string respError = await response.Content.ReadAsStringAsync();
-                Log($"Failed to upload {fileName}. Status: {response.StatusCode} | {respError}");
+                string err = await response.Content.ReadAsStringAsync();
+                Log($"Upload failed for {fileName}: {response.StatusCode} | {err}");
             }
         }
         catch (Exception ex)
         {
-            Log($"Exception during upload of {fileName}: {ex.Message}");
+            Log($"Upload exception for {fileName}: {ex.Message}");
         }
     }
 }
