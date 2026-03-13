@@ -123,7 +123,7 @@ public class DemoHistoryTracker
 public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 {
     public override string ModuleName => "CS2DemoBuddy";
-    public override string ModuleVersion => "3.3.2";
+    public override string ModuleVersion => "4.0.0";
     public override string ModuleAuthor => "VinSix";
 
     public CS2DemoBuddyConfig Config { get; set; } = new();
@@ -146,6 +146,8 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private CancellationTokenSource? _inventoryCts;
     private string _gameDirectory = "";
     private CounterStrikeSharp.API.Modules.Timers.Timer? _sizeMonitorTimer;
+    private CounterStrikeSharp.API.Modules.Timers.Timer? _playerMonitorTimer;
+    private DateTime? _emptyServerSince;
 
     private void Log(string message)
     {
@@ -270,6 +272,54 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             return HookResult.Continue;
         });
 
+        // When a player connects, start recording if we aren't already.
+        // This handles resuming after an empty-server stop without waiting
+        // for the next RoundStart.
+        RegisterEventHandler<EventPlayerConnectFull>((@event, info) =>
+        {
+            if (!IsRecording)
+            {
+                AddTimer(3.0f, () =>
+                {
+                    if (IsRecording) return;
+                    if (IsWarmup()) return;
+                    try
+                    {
+                        var players = Utilities.GetPlayers();
+                        int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
+                        if (humanCount > 0)
+                        {
+                            Log($"Player connected with {humanCount} human(s). Starting fresh recording...");
+                            StartRecording();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"PlayerConnect recording start error: {ex.Message}");
+                    }
+                });
+            }
+            return HookResult.Continue;
+        });
+
+        // If loaded mid-round (hot reload), start recording immediately
+        if (hotReload)
+        {
+            AddTimer(1.0f, () =>
+            {
+                if (!IsRecording && !IsWarmup())
+                {
+                    var players = Utilities.GetPlayers();
+                    int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
+                    if (humanCount > 0)
+                    {
+                        Log($"Hot reload detected with {humanCount} human(s). Starting recording...");
+                        StartRecording();
+                    }
+                }
+            });
+        }
+
         AddTimer(2700.0f, RunGarbageCollection, TimerFlags.REPEAT);
 
         // Periodic source-file inventory reporting
@@ -311,6 +361,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             _inventoryCts.Dispose();
             _inventoryCts = null;
         }
+
+        // Kill monitor timers
+        _sizeMonitorTimer?.Kill();
+        _sizeMonitorTimer = null;
+        _playerMonitorTimer?.Kill();
+        _playerMonitorTimer = null;
 
         CurrentDemoName = "";
         HistoryTracker = null;
@@ -447,10 +503,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // Clear watcher list for this recording session
         lock (_watcherLock) { _watcherCreatedFiles.Clear(); }
 
+        // Kill previous size monitor timer to prevent accumulation across maps
+        _sizeMonitorTimer?.Kill();
+        _sizeMonitorTimer = null;
+
         Server.NextFrame(() =>
         {
-            // Force tv_delay 0 immediately before recording as a safety net.
-            Server.ExecuteCommand("tv_delay 0");
             Server.ExecuteCommand($"tv_record {CurrentDemoName}");
             Log($"Started recording: {demoFileName} (Match: {_matchFolder})");
 
@@ -497,6 +555,45 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 Log($"[SIZE MONITOR] {monitorDemoName}.dem NOT FOUND on disk yet");
             }
         }, TimerFlags.REPEAT);
+
+        // Monitor player count — stop recording if server is empty for 5+ minutes
+        _playerMonitorTimer?.Kill();
+        _playerMonitorTimer = null;
+        _emptyServerSince = null;
+        _playerMonitorTimer = AddTimer(30.0f, () =>
+        {
+            if (!IsRecording) return;
+            try
+            {
+                var players = Utilities.GetPlayers();
+                int humanCount = players.Count(p => p != null && p.IsValid && !p.IsBot && !p.IsHLTV);
+                if (humanCount == 0)
+                {
+                    if (_emptyServerSince == null)
+                    {
+                        _emptyServerSince = DateTime.UtcNow;
+                        Log("Server has 0 players — starting 5-minute empty-server countdown.");
+                    }
+                    else if ((DateTime.UtcNow - _emptyServerSince.Value).TotalSeconds >= 300)
+                    {
+                        Log("Server empty for 5+ minutes — stopping recording.");
+                        StopAndUploadDemo();
+                    }
+                }
+                else
+                {
+                    if (_emptyServerSince != null)
+                    {
+                        Log($"Player present — cancelling empty-server countdown ({humanCount} human(s)).");
+                        _emptyServerSince = null;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Player monitor error: {ex.Message}");
+            }
+        }, TimerFlags.REPEAT);
     }
 
     private void OnMapStart(string mapName)
@@ -506,24 +603,10 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         _matchDate = "";
         Log($"Map started: {mapName}");
 
-        // Apply GOTV settings immediately...
-        ApplyGotvSettings();
-
-        // ...and again after 3 seconds. Something on the server (gamemode cfg,
-        // another plugin, or the engine itself) overrides tv_delay to 30 after
-        // map start. The delayed re-apply ensures our settings win.
-        AddTimer(3.0f, () =>
-        {
-            Log("Re-applying GOTV settings (delayed post-map-start)...");
-            ApplyGotvSettings();
-        });
-
-        // One more at 10 seconds for good measure
-        AddTimer(10.0f, () =>
-        {
-            Log("Re-applying GOTV settings (10s post-map-start)...");
-            ApplyGotvSettings();
-        });
+        // NO cvar changes here — GOTV settings are applied once at plugin load.
+        // Changing cvars on every map start was causing the engine to fight with
+        // the plugin over tv_delay and potentially disrupting the GOTV buffer.
+        // Set your GOTV cvars in server.cfg or launch params instead.
     }
 
     private void OnMapEnd()
@@ -534,6 +617,13 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private void StopAndUploadDemo()
     {
         if (!IsRecording) return;
+
+        // Kill timers for this recording
+        _sizeMonitorTimer?.Kill();
+        _sizeMonitorTimer = null;
+        _playerMonitorTimer?.Kill();
+        _playerMonitorTimer = null;
+        _emptyServerSince = null;
 
         Server.ExecuteCommand("tv_stoprecord");
         IsRecording = false;
