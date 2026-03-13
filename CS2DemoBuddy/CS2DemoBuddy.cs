@@ -1,5 +1,6 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Modules.Commands;
 using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Timers;
 using System.Net.Http.Headers;
@@ -134,6 +135,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     // ── Recording state ────────────────────────────────────────────────
     private string _currentDemoName = "";
     private bool _isRecording = false;
+    private bool _isRecordingForbidden = true;
     private string _matchFolder = "";
     private string _matchDate = "";
     private string _demoDir = "";          // resolved once at load
@@ -229,26 +231,25 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         HistoryTracker = new DemoHistoryTracker(configDir, Log);
 
         // Clear any stuck recording from a previous session / crash
-        Server.ExecuteCommand("tv_stoprecord");
-
-        // ── This plugin does NOT set any GOTV cvars. ──
-        // You MUST configure these in your server.cfg or launch params:
-        //   +tv_enable 1
-        //   tv_delay 0
-        //   tv_autorecord 0
-        // The engine/gamemode configs reset cvars on every map load,
-        // overriding anything we set here. server.cfg runs AFTER
-        // gamemode configs, so values set there will stick.
+        Server.ExecuteCommand("tv_stoprecord -instance 1");
 
         // Log current GOTV cvar values for diagnostics
         LogGotvDiagnostics("Plugin load");
 
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
+        RegisterListener<Listeners.OnServerHibernationUpdate>(OnServerHibernationUpdate);
+
+        // ── Changelevel interception: stop recording before map changes ──
+        AddCommandListener("changelevel", CommandListener_Changelevel, HookMode.Pre);
+        AddCommandListener("ds_workshop_changelevel", CommandListener_Changelevel, HookMode.Pre);
+        AddCommandListener("map", CommandListener_Changelevel, HookMode.Pre);
+        AddCommandListener("host_workshop_map", CommandListener_Changelevel, HookMode.Pre);
 
         // ── Recording trigger: first non-warmup round with humans ──
         RegisterEventHandler<EventRoundStart>((@event, info) =>
         {
+            _isRecordingForbidden = false;
             if (!_isRecording)
             {
                 try
@@ -270,30 +271,66 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             return HookResult.Continue;
         });
 
-        // ── Log match end (recording continues until map change) ──
+        // ── Match ended: stop recording ──
         RegisterEventHandler<EventCsWinPanelMatch>((@event, info) =>
         {
-            if (_isRecording)
-                Log("Match ended — recording continues until map change.");
+            Log("Match ended — stopping recording.");
+            _isRecordingForbidden = true;
+            StopAndUploadDemo("Match ended");
             return HookResult.Continue;
         });
 
-        // ── Resume after empty-server stop ──
+        // ── New match: allow recording again ──
+        RegisterEventHandler<EventBeginNewMatch>((@event, info) =>
+        {
+            Log("New match started.");
+            _isRecordingForbidden = false;
+            if (CountHumans() > 0 && !IsWarmup())
+                StartRecording();
+            return HookResult.Continue;
+        });
+
+        // ── Match end restart: block recording during restart ──
+        RegisterEventHandler<EventCsMatchEndRestart>((@event, info) =>
+        {
+            Log("Match end restart.");
+            _isRecordingForbidden = true;
+            return HookResult.Continue;
+        });
+
+        // ── Resume after empty-server stop / player connect ──
         RegisterEventHandler<EventPlayerConnectFull>((@event, info) =>
         {
+            var player = @event.Userid;
+            if (player == null || player.IsBot || player.IsHLTV)
+                return HookResult.Continue;
+
             if (!_isRecording)
             {
-                AddTimer(3.0f, () =>
+                if (CountHumans() > 0 && !IsWarmup())
                 {
-                    if (_isRecording || IsWarmup()) return;
-                    int humans = CountHumans();
-                    if (humans > 0)
-                    {
-                        Log($"Player connected ({humans} human(s)) — starting fresh recording.");
-                        StartRecording();
-                    }
-                });
+                    Log($"Player connected ({CountHumans()} human(s)) — starting recording.");
+                    StartRecording();
+                }
             }
+            return HookResult.Continue;
+        });
+
+        // ── Player disconnect: stop if no humans left ──
+        RegisterEventHandler<EventPlayerDisconnect>((@event, info) =>
+        {
+            var player = @event.Userid;
+            if (player == null || player.IsBot || player.IsHLTV)
+                return HookResult.Continue;
+
+            Server.NextFrame(() =>
+            {
+                if (_isRecording && CountHumans() == 0)
+                {
+                    Log("All players disconnected — stopping recording.");
+                    StopAndUploadDemo("All players disconnected");
+                }
+            });
             return HookResult.Continue;
         });
 
@@ -302,6 +339,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         {
             AddTimer(1.0f, () =>
             {
+                _isRecordingForbidden = false;
                 if (!_isRecording && !IsWarmup() && CountHumans() > 0)
                 {
                     Log($"Hot reload — starting recording.");
@@ -326,7 +364,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         if (_isRecording)
         {
-            Server.ExecuteCommand("tv_stoprecord");
+            Server.ExecuteCommand("tv_stoprecord -instance 1");
             _isRecording = false;
         }
 
@@ -351,6 +389,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // Reset state — OnMapEnd already stopped recording, but this is
         // a safety net in case OnMapEnd didn't fire.
         _isRecording = false;
+        _isRecordingForbidden = false;
         _matchFolder = "";
         _matchDate = "";
         KillTimers();
@@ -361,7 +400,38 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private void OnMapEnd()
     {
+        _isRecordingForbidden = true;
         StopAndUploadDemo("Map ended");
+    }
+
+    private void OnServerHibernationUpdate(bool isHibernating)
+    {
+        Log($"Server hibernation update: {(isHibernating ? "started" : "ended")}");
+        if (isHibernating)
+        {
+            _isRecordingForbidden = true;
+            StopAndUploadDemo("Server hibernating");
+        }
+        else
+        {
+            _isRecordingForbidden = false;
+        }
+    }
+
+    private HookResult CommandListener_Changelevel(CCSPlayerController? player, CommandInfo commandInfo)
+    {
+        if (_isRecording && commandInfo.ArgCount >= 2)
+        {
+            Log($"Intercepted changelevel: {commandInfo.GetArg(0)} {commandInfo.GetArg(1)}");
+            _isRecordingForbidden = true;
+            StopAndUploadDemo("Changelevel");
+            string command = commandInfo.GetArg(0);
+            string map = commandInfo.GetArg(1);
+            // Delay the actual changelevel so the recording flushes cleanly
+            AddTimer(3.0f, () => Server.ExecuteCommand($"{command} {map}"));
+            return HookResult.Stop;
+        }
+        return HookResult.Continue;
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -370,7 +440,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private void StartRecording()
     {
-        if (_isRecording) return;
+        if (_isRecording || _isRecordingForbidden) return;
 
         string mapName = Server.MapName;
         string ts = DateTime.UtcNow.ToString("HHmmss");
@@ -383,12 +453,20 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         _isRecording = true;
 
+        // Frame 1: Enable HLTV and set immediate recording mode
         Server.NextFrame(() =>
         {
-            Server.ExecuteCommand($"tv_record {_currentDemoName}");
-            Log($"▶ Recording started: {demoFileName}  (folder: {_matchFolder})");
-            Server.ExecuteCommand("tv_status");
-            LogGotvDiagnostics("Recording start");
+            Server.ExecuteCommand("tv_enable 1");
+            Server.ExecuteCommand("tv_record_immediate 1");
+
+            // Frame 2: Actually start recording (engine needs a tick to process HLTV enable)
+            Server.NextFrame(() =>
+            {
+                Server.ExecuteCommand($"tv_record {_currentDemoName} -instance 1");
+                Log($"▶ Recording started: {demoFileName}  (folder: {_matchFolder})");
+                Server.ExecuteCommand("tv_status");
+                LogGotvDiagnostics("Recording start");
+            });
         });
 
         // ── Size monitor: log file size every 60 s ──
@@ -447,7 +525,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         KillTimers();
 
-        Server.ExecuteCommand("tv_stoprecord");
+        Server.ExecuteCommand("tv_stoprecord -instance 1");
         _isRecording = false;
 
         string demoFileName = $"{_currentDemoName}.dem";
