@@ -136,6 +136,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private string _currentDemoName = "";
     private bool _isRecording = false;
     private bool _isRecordingForbidden = true;
+    private bool _isChangingLevel = false;
     private string _matchFolder = "";
     private string _matchDate = "";
     private string _demoDir = "";          // resolved once at load
@@ -249,6 +250,8 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // ── Recording trigger: first non-warmup round with humans ──
         RegisterEventHandler<EventRoundStart>((@event, info) =>
         {
+            if (_isChangingLevel) return HookResult.Continue;
+
             _isRecordingForbidden = false;
             if (!_isRecording)
             {
@@ -283,10 +286,16 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // ── New match: allow recording again ──
         RegisterEventHandler<EventBeginNewMatch>((@event, info) =>
         {
+            if (_isChangingLevel) return HookResult.Continue;
+
             Log("New match started.");
             _isRecordingForbidden = false;
-            if (CountHumans() > 0 && !IsWarmup())
-                StartRecording();
+            try
+            {
+                if (CountHumans() > 0 && !IsWarmup())
+                    StartRecording();
+            }
+            catch (Exception ex) { Log($"BeginNewMatch error: {ex.Message}"); }
             return HookResult.Continue;
         });
 
@@ -301,18 +310,24 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // ── Resume after empty-server stop / player connect ──
         RegisterEventHandler<EventPlayerConnectFull>((@event, info) =>
         {
+            if (_isChangingLevel) return HookResult.Continue;
+
             var player = @event.Userid;
             if (player == null || player.IsBot || player.IsHLTV)
                 return HookResult.Continue;
 
-            if (!_isRecording)
+            try
             {
-                if (CountHumans() > 0 && !IsWarmup())
+                if (!_isRecording)
                 {
-                    Log($"Player connected ({CountHumans()} human(s)) — starting recording.");
-                    StartRecording();
+                    if (CountHumans() > 0 && !IsWarmup())
+                    {
+                        Log($"Player connected ({CountHumans()} human(s)) — starting recording.");
+                        StartRecording();
+                    }
                 }
             }
+            catch (Exception ex) { Log($"PlayerConnectFull error: {ex.Message}"); }
             return HookResult.Continue;
         });
 
@@ -325,10 +340,20 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
             Server.NextFrame(() =>
             {
-                if (_isRecording && CountHumans() == 0)
+                // Guard: don't access entities during map transition
+                if (_isChangingLevel || _isRecordingForbidden) return;
+
+                try
                 {
-                    Log("All players disconnected — stopping recording.");
-                    StopAndUploadDemo("All players disconnected");
+                    if (_isRecording && CountHumans() == 0)
+                    {
+                        Log("All players disconnected — stopping recording.");
+                        StopAndUploadDemo("All players disconnected");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"PlayerDisconnect NextFrame error: {ex.Message}");
                 }
             });
             return HookResult.Continue;
@@ -390,6 +415,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // a safety net in case OnMapEnd didn't fire.
         _isRecording = false;
         _isRecordingForbidden = false;
+        _isChangingLevel = false;
         _matchFolder = "";
         _matchDate = "";
         KillTimers();
@@ -418,17 +444,49 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         }
     }
 
+    // Allowed changelevel commands — reject anything else to prevent command injection
+    private static readonly HashSet<string> AllowedChangelevelCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "changelevel", "ds_workshop_changelevel", "map", "host_workshop_map"
+    };
+
     private HookResult CommandListener_Changelevel(CCSPlayerController? player, CommandInfo commandInfo)
     {
+        if (_isChangingLevel)
+        {
+            // Already handling a changelevel — let the delayed one through
+            return HookResult.Continue;
+        }
+
         if (_isRecording && commandInfo.ArgCount >= 2)
         {
-            Log($"Intercepted changelevel: {commandInfo.GetArg(0)} {commandInfo.GetArg(1)}");
-            _isRecordingForbidden = true;
-            StopAndUploadDemo("Changelevel");
             string command = commandInfo.GetArg(0);
             string map = commandInfo.GetArg(1);
+
+            // Validate the command is one we expect
+            if (!AllowedChangelevelCommands.Contains(command))
+            {
+                Log($"Changelevel interceptor: unexpected command '{command}' — ignoring.");
+                return HookResult.Continue;
+            }
+
+            // Sanitize the map name — allow only alphanumeric, underscores, hyphens, slashes, dots
+            if (!System.Text.RegularExpressions.Regex.IsMatch(map, @"^[\w\-./]+$"))
+            {
+                Log($"Changelevel interceptor: invalid map name '{map}' — ignoring.");
+                return HookResult.Continue;
+            }
+
+            Log($"Intercepted changelevel: {command} {map}");
+            _isRecordingForbidden = true;
+            _isChangingLevel = true;
+            StopAndUploadDemo("Changelevel");
+
             // Delay the actual changelevel so the recording flushes cleanly
-            AddTimer(3.0f, () => Server.ExecuteCommand($"{command} {map}"));
+            AddTimer(3.0f, () =>
+            {
+                Server.ExecuteCommand($"{command} {map}");
+            });
             return HookResult.Stop;
         }
         return HookResult.Continue;
