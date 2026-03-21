@@ -338,14 +338,18 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             if (player == null || player.IsBot || player.IsHLTV)
                 return HookResult.Continue;
 
+            // Don't schedule any work if already shutting down or not recording
+            if (!_isRecording || _isChangingLevel || _isRecordingForbidden)
+                return HookResult.Continue;
+
             Server.NextFrame(() =>
             {
                 // Guard: don't access entities during map transition
-                if (_isChangingLevel || _isRecordingForbidden) return;
+                if (_isChangingLevel || _isRecordingForbidden || !_isRecording) return;
 
                 try
                 {
-                    if (_isRecording && CountHumans() == 0)
+                    if (CountHumans() == 0)
                     {
                         Log("All players disconnected — stopping recording.");
                         StopAndUploadDemo("All players disconnected");
@@ -426,8 +430,11 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private void OnMapEnd()
     {
+        _isChangingLevel = true;
         _isRecordingForbidden = true;
-        StopAndUploadDemo("Map ended");
+        // Skip tv_stoprecord — the engine is already shutting down HLTV
+        // (CHLTVServer::Shutdown). Issuing the command here can crash.
+        StopAndUploadDemo("Map ended", skipStopCommand: true);
     }
 
     private void OnServerHibernationUpdate(bool isHibernating)
@@ -536,7 +543,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         string monitorDir = _demoDir;
         _sizeMonitorTimer = AddTimer(60.0f, () =>
         {
-            if (!_isRecording) return;
+            if (!_isRecording || _isChangingLevel) return;
             string path = Path.Combine(monitorDir, $"{monitorName}.dem");
             if (File.Exists(path))
             {
@@ -557,7 +564,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         _emptyServerSince = null;
         _playerMonitorTimer = AddTimer(30.0f, () =>
         {
-            if (!_isRecording) return;
+            if (!_isRecording || _isChangingLevel) return;
             int humans = CountHumans();
             if (humans == 0)
             {
@@ -580,13 +587,23 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         }, TimerFlags.REPEAT);
     }
 
-    private void StopAndUploadDemo(string reason)
+    private void StopAndUploadDemo(string reason, bool skipStopCommand = false)
     {
         if (!_isRecording) return;
 
         KillTimers();
 
-        Server.ExecuteCommand("tv_stoprecord -instance 1");
+        if (!skipStopCommand)
+        {
+            try
+            {
+                Server.ExecuteCommand("tv_stoprecord -instance 1");
+            }
+            catch (Exception ex)
+            {
+                Log($"tv_stoprecord error during '{reason}': {ex.Message}");
+            }
+        }
         _isRecording = false;
 
         string demoFileName = $"{_currentDemoName}.dem";
