@@ -618,52 +618,60 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
         Task.Run(async () =>
         {
-            // CS2 flushes the .dem file when tv_stoprecord runs (or on map change).
-            // Give the engine a moment, then look for it.
-            await Task.Delay(10000);
-
-            string? path = FindDemoFile(demoFileName, demoDir, gameDir);
-
-            if (path == null)
+            try
             {
-                Log($"Demo not found after 10 s, waiting 30 s more...");
-                await Task.Delay(30000);
-                path = FindDemoFile(demoFileName, demoDir, gameDir);
-            }
+                // CS2 flushes the .dem file when tv_stoprecord runs (or on map change).
+                // Give the engine a moment, then look for it.
+                await Task.Delay(10000);
 
-            if (path == null)
-            {
-                Log($"Demo not found after 40 s, waiting 60 s more...");
-                await Task.Delay(60000);
-                path = FindDemoFile(demoFileName, demoDir, gameDir);
-            }
+                string? path = FindDemoFile(demoFileName, demoDir, gameDir);
 
-            if (path == null)
-            {
-                Log($"Could not find {demoFileName} after extended wait — GC will retry.");
-                return;
-            }
+                if (path == null)
+                {
+                    Log($"Demo not found after 10 s, waiting 30 s more...");
+                    await Task.Delay(30000);
+                    path = FindDemoFile(demoFileName, demoDir, gameDir);
+                }
 
-            path = await WaitForFileStable(path);
-            if (path == null)
-            {
+                if (path == null)
+                {
+                    Log($"Demo not found after 40 s, waiting 60 s more...");
+                    await Task.Delay(60000);
+                    path = FindDemoFile(demoFileName, demoDir, gameDir);
+                }
+
+                if (path == null)
+                {
+                    Log($"Could not find {demoFileName} after extended wait — GC will retry.");
+                    return;
+                }
+
+                path = await WaitForFileStable(path);
+                if (path == null)
+                {
+                    lock (_pendingLock) { _pendingFiles.Remove(demoFileName); }
+                    return;
+                }
+
+                long finalSize = new FileInfo(path).Length;
+                Log($"Demo on disk: {demoFileName} = {finalSize / 1024}KB ({finalSize / (1024 * 1024.0):F1}MB)");
+
+                if (finalSize < MinDemoSizeBytes)
+                {
+                    Log($"Skipping {demoFileName} — too small. GC will clean up.");
+                    HistoryTracker?.RemoveDemo(demoFileName);
+                    lock (_pendingLock) { _pendingFiles.Remove(demoFileName); }
+                    return;
+                }
+
+                await UploadDemoRoutine(path, demoFileName, null, stoppedFolder, stoppedDate);
                 lock (_pendingLock) { _pendingFiles.Remove(demoFileName); }
-                return;
             }
-
-            long finalSize = new FileInfo(path).Length;
-            Log($"Demo on disk: {demoFileName} = {finalSize / 1024}KB ({finalSize / (1024 * 1024.0):F1}MB)");
-
-            if (finalSize < MinDemoSizeBytes)
+            catch (Exception ex)
             {
-                Log($"Skipping {demoFileName} — too small. GC will clean up.");
-                HistoryTracker?.RemoveDemo(demoFileName);
+                Log($"Background upload task error for {demoFileName}: {ex.Message}");
                 lock (_pendingLock) { _pendingFiles.Remove(demoFileName); }
-                return;
             }
-
-            await UploadDemoRoutine(path, demoFileName, null, stoppedFolder, stoppedDate);
-            lock (_pendingLock) { _pendingFiles.Remove(demoFileName); }
         });
     }
 
@@ -847,6 +855,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         string targetServer, string? matchFolder, string? matchDate)
     {
         try { await UploadDemoRoutine(filePath, fileName, targetServer, matchFolder, matchDate); }
+        catch (Exception ex) { Log($"GC retry upload error for {fileName}: {ex.Message}"); }
         finally { lock (_pendingLock) { _pendingFiles.Remove(fileName); } }
     }
 
@@ -856,15 +865,20 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private async Task RunInventoryLoop(CancellationToken ct)
     {
-        try { await Task.Delay(15000, ct); } catch (TaskCanceledException) { return; }
-
-        while (!ct.IsCancellationRequested)
+        try
         {
-            try { await ReportSourceFiles(); }
-            catch (Exception ex) { Log($"Inventory error: {ex.Message}"); }
+            await Task.Delay(15000, ct);
 
-            try { await Task.Delay(60000, ct); } catch (TaskCanceledException) { return; }
+            while (!ct.IsCancellationRequested)
+            {
+                try { await ReportSourceFiles(); }
+                catch (Exception ex) { Log($"Inventory error: {ex.Message}"); }
+
+                await Task.Delay(60000, ct);
+            }
         }
+        catch (TaskCanceledException) { }
+        catch (Exception ex) { Log($"Inventory loop fatal: {ex.Message}"); }
     }
 
     private async Task ReportSourceFiles()
