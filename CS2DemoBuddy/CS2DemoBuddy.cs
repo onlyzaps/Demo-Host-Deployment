@@ -1,7 +1,6 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Commands;
-using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Timers;
 using System.Net.Http.Headers;
 using System.Text.Json.Serialization;
@@ -142,7 +141,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private string _demoDir = "";          // resolved once at load
 
     // ── Timers ─────────────────────────────────────────────────────────
-    private CounterStrikeSharp.API.Modules.Timers.Timer? _sizeMonitorTimer;
+
     private CounterStrikeSharp.API.Modules.Timers.Timer? _playerMonitorTimer;
     private DateTime? _emptyServerSince;
 
@@ -234,8 +233,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // Clear any stuck recording from a previous session / crash
         Server.ExecuteCommand("tv_stoprecord -instance 1");
 
-        // Log current GOTV cvar values for diagnostics
-        LogGotvDiagnostics("Plugin load");
+
 
         RegisterListener<Listeners.OnMapStart>(OnMapStart);
         RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
@@ -250,6 +248,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // ── Recording trigger: first non-warmup round with humans ──
         RegisterEventHandler<EventRoundStart>((@event, info) =>
         {
+            Log($"[DEBUG] EventRoundStart fired — _isChangingLevel={_isChangingLevel} _isRecording={_isRecording} _isRecordingForbidden={_isRecordingForbidden}");
             if (_isChangingLevel) return HookResult.Continue;
 
             _isRecordingForbidden = false;
@@ -277,15 +276,18 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // ── Match ended: stop recording ──
         RegisterEventHandler<EventCsWinPanelMatch>((@event, info) =>
         {
+            Log($"[DEBUG] EventCsWinPanelMatch fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _currentDemoName={_currentDemoName}");
             Log("Match ended — stopping recording.");
             _isRecordingForbidden = true;
             StopAndUploadDemo("Match ended");
+            Log($"[DEBUG] EventCsWinPanelMatch handler done — _isRecording={_isRecording} _isRecordingForbidden={_isRecordingForbidden}");
             return HookResult.Continue;
         });
 
         // ── New match: allow recording again ──
         RegisterEventHandler<EventBeginNewMatch>((@event, info) =>
         {
+            Log($"[DEBUG] EventBeginNewMatch fired — _isChangingLevel={_isChangingLevel} _isRecording={_isRecording} _isRecordingForbidden={_isRecordingForbidden}");
             if (_isChangingLevel) return HookResult.Continue;
 
             Log("New match started.");
@@ -302,6 +304,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // ── Match end restart: block recording during restart ──
         RegisterEventHandler<EventCsMatchEndRestart>((@event, info) =>
         {
+            Log($"[DEBUG] EventCsMatchEndRestart fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden}");
             Log("Match end restart.");
             _isRecordingForbidden = true;
             return HookResult.Continue;
@@ -310,6 +313,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // ── Resume after empty-server stop / player connect ──
         RegisterEventHandler<EventPlayerConnectFull>((@event, info) =>
         {
+            Log($"[DEBUG] EventPlayerConnectFull fired — _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _isRecording={_isRecording}");
             if (_isChangingLevel || _isRecordingForbidden) return HookResult.Continue;
 
             var player = @event.Userid;
@@ -320,9 +324,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             {
                 if (!_isRecording)
                 {
-                    if (CountHumans() > 0 && !IsWarmup())
+                    int humans = CountHumans();
+                    bool warmup = IsWarmup();
+                    Log($"[DEBUG] PlayerConnectFull — humans={humans} warmup={warmup}");
+                    if (humans > 0 && !warmup)
                     {
-                        Log($"Player connected ({CountHumans()} human(s)) — starting recording.");
+                        Log($"Player connected ({humans} human(s)) — starting recording.");
                         StartRecording();
                     }
                 }
@@ -334,24 +341,43 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // ── Player disconnect: stop if no humans left ──
         RegisterEventHandler<EventPlayerDisconnect>((@event, info) =>
         {
+            Log($"[DEBUG] EventPlayerDisconnect fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden}");
+
             // Check plugin state FIRST — during map shutdown the engine fires
             // disconnect events while player entities are being torn down.
             // Accessing @event.Userid properties on freed native memory segfaults.
             if (!_isRecording || _isChangingLevel || _isRecordingForbidden)
+            {
+                Log($"[DEBUG] EventPlayerDisconnect — early exit (state guard)");
                 return HookResult.Continue;
+            }
 
             var player = @event.Userid;
-            if (player == null || !player.IsValid || player.IsBot || player.IsHLTV)
+            bool isNull = player == null;
+            bool isValid = !isNull && player!.IsValid;
+            bool isBot = isValid && player!.IsBot;
+            bool isHltv = isValid && player!.IsHLTV;
+            Log($"[DEBUG] EventPlayerDisconnect — player null={isNull} valid={isValid} bot={isBot} hltv={isHltv}");
+
+            if (isNull || !isValid || isBot || isHltv)
                 return HookResult.Continue;
 
+            Log($"[DEBUG] EventPlayerDisconnect — scheduling NextFrame check for human player");
             Server.NextFrame(() =>
             {
+                Log($"[DEBUG] EventPlayerDisconnect NextFrame — _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _isRecording={_isRecording}");
                 // Guard: don't access entities during map transition
-                if (_isChangingLevel || _isRecordingForbidden || !_isRecording) return;
+                if (_isChangingLevel || _isRecordingForbidden || !_isRecording)
+                {
+                    Log($"[DEBUG] EventPlayerDisconnect NextFrame — early exit (state guard)");
+                    return;
+                }
 
                 try
                 {
-                    if (CountHumans() == 0)
+                    int humans = CountHumans();
+                    Log($"[DEBUG] EventPlayerDisconnect NextFrame — humans={humans}");
+                    if (humans == 0)
                     {
                         Log("All players disconnected — stopping recording.");
                         StopAndUploadDemo("All players disconnected");
@@ -417,6 +443,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private void OnMapStart(string mapName)
     {
+        Log($"[DEBUG] OnMapStart({mapName}) — BEFORE reset: _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _currentDemoName={_currentDemoName}");
         // Reset state — OnMapEnd already stopped recording, but this is
         // a safety net in case OnMapEnd didn't fire.
         _isRecording = false;
@@ -427,20 +454,22 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         KillTimers();
 
         Log($"Map started: {mapName}");
-        LogGotvDiagnostics("Map start");
     }
 
     private void OnMapEnd()
     {
+        Log($"[DEBUG] OnMapEnd fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _currentDemoName={_currentDemoName}");
         _isChangingLevel = true;
         _isRecordingForbidden = true;
         // Skip tv_stoprecord — the engine is already shutting down HLTV
         // (CHLTVServer::Shutdown). Issuing the command here can crash.
         StopAndUploadDemo("Map ended", skipStopCommand: true);
+        Log($"[DEBUG] OnMapEnd done — _isRecording={_isRecording}");
     }
 
     private void OnServerHibernationUpdate(bool isHibernating)
     {
+        Log($"[DEBUG] OnServerHibernationUpdate({isHibernating}) — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden}");
         Log($"Server hibernation update: {(isHibernating ? "started" : "ended")}");
         if (isHibernating)
         {
@@ -461,8 +490,10 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private HookResult CommandListener_Changelevel(CCSPlayerController? player, CommandInfo commandInfo)
     {
+        Log($"[DEBUG] CommandListener_Changelevel — _isChangingLevel={_isChangingLevel} _isRecording={_isRecording} argCount={commandInfo.ArgCount}");
         if (_isChangingLevel)
         {
+            Log($"[DEBUG] CommandListener_Changelevel — already changing level, passing through");
             // Already handling a changelevel — let the delayed one through
             return HookResult.Continue;
         }
@@ -534,35 +565,11 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             {
                 Server.ExecuteCommand($"tv_record {_currentDemoName} -instance 1");
                 Log($"▶ Recording started: {demoFileName}  (folder: {_matchFolder})");
-                Server.ExecuteCommand("tv_status");
-                LogGotvDiagnostics("Recording start");
             });
         });
 
-        // ── Size monitor: log file size every 60 s ──
-        KillTimers();
-        string monitorName = _currentDemoName;
-        string monitorDir = _demoDir;
-        _sizeMonitorTimer = AddTimer(60.0f, () =>
-        {
-            if (!_isRecording || _isChangingLevel) return;
-            string path = Path.Combine(monitorDir, $"{monitorName}.dem");
-            if (File.Exists(path))
-            {
-                try
-                {
-                    long sz = new FileInfo(path).Length;
-                    Log($"[SIZE] {monitorName}.dem = {sz / 1024}KB ({sz / (1024 * 1024.0):F2}MB)");
-                }
-                catch (Exception ex) { Log($"[SIZE] read error: {ex.Message}"); }
-            }
-            else
-            {
-                Log($"[SIZE] {monitorName}.dem not on disk yet");
-            }
-        }, TimerFlags.REPEAT);
-
         // ── Player monitor: stop after 5 min with 0 humans ──
+        KillTimers();
         _emptyServerSince = null;
         _playerMonitorTimer = AddTimer(30.0f, () =>
         {
@@ -591,7 +598,12 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private void StopAndUploadDemo(string reason, bool skipStopCommand = false)
     {
-        if (!_isRecording) return;
+        Log($"[DEBUG] StopAndUploadDemo('{reason}', skipStop={skipStopCommand}) — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _currentDemoName={_currentDemoName}");
+        if (!_isRecording)
+        {
+            Log($"[DEBUG] StopAndUploadDemo — not recording, returning early");
+            return;
+        }
 
         KillTimers();
 
@@ -599,12 +611,17 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         {
             try
             {
+                Log($"[DEBUG] StopAndUploadDemo — executing tv_stoprecord");
                 Server.ExecuteCommand("tv_stoprecord -instance 1");
             }
             catch (Exception ex)
             {
                 Log($"tv_stoprecord error during '{reason}': {ex.Message}");
             }
+        }
+        else
+        {
+            Log($"[DEBUG] StopAndUploadDemo — skipping tv_stoprecord (engine teardown)");
         }
         _isRecording = false;
 
@@ -683,8 +700,6 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private void KillTimers()
     {
-        _sizeMonitorTimer?.Kill();
-        _sizeMonitorTimer = null;
         _playerMonitorTimer?.Kill();
         _playerMonitorTimer = null;
         _emptyServerSince = null;
@@ -709,26 +724,6 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             return rules?.WarmupPeriod ?? false;
         }
         catch { return false; }
-    }
-
-    private void LogGotvDiagnostics(string context)
-    {
-        Log($"GOTV diagnostics ({context}):");
-        foreach (var name in new[] { "tv_enable", "tv_delay", "tv_autorecord",
-                                      "tv_record_immediate", "tv_transmitall",
-                                      "tv_relayvoice", "tv_snapshotrate", "tv_maxrate" })
-        {
-            try
-            {
-                var cv = ConVar.Find(name);
-                if (cv == null) { Log($"  {name} = NOT FOUND"); continue; }
-                try { Log($"  {name} = {cv.GetPrimitiveValue<int>()}"); continue; } catch { }
-                try { Log($"  {name} = {cv.GetPrimitiveValue<bool>()}"); continue; } catch { }
-                try { Log($"  {name} = {cv.GetPrimitiveValue<float>()}"); continue; } catch { }
-                Log($"  {name} = (unknown type)");
-            }
-            catch (Exception ex) { Log($"  {name} = ERROR: {ex.Message}"); }
-        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
