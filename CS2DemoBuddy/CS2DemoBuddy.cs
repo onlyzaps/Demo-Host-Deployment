@@ -136,6 +136,7 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
     private bool _isRecording = false;
     private bool _isRecordingForbidden = true;
     private bool _isChangingLevel = false;
+    private bool _matchEndedAwaitingMapChange = false;
     private string _matchFolder = "";
     private string _matchDate = "";
     private string _demoDir = "";          // resolved once at load
@@ -248,13 +249,13 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // ── Recording trigger: first non-warmup round with humans ──
         RegisterEventHandler<EventRoundStart>((@event, info) =>
         {
-            Log($"[DEBUG] EventRoundStart fired — _isChangingLevel={_isChangingLevel} _isRecording={_isRecording} _isRecordingForbidden={_isRecordingForbidden}");
-            if (_isChangingLevel) return HookResult.Continue;
-
-            _isRecordingForbidden = false;
-            if (!_isRecording)
+            try
             {
-                try
+                Log($"[DEBUG] EventRoundStart fired — _isChangingLevel={_isChangingLevel} _isRecording={_isRecording} _isRecordingForbidden={_isRecordingForbidden} _matchEndedAwaitingMapChange={_matchEndedAwaitingMapChange}");
+                if (_isChangingLevel || _matchEndedAwaitingMapChange) return HookResult.Continue;
+
+                _isRecordingForbidden = false;
+                if (!_isRecording)
                 {
                     if (IsWarmup())
                     {
@@ -268,60 +269,69 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                         StartRecording();
                     }
                 }
-                catch (Exception ex) { Log($"RoundStart error: {ex.Message}"); }
             }
+            catch (Exception ex) { Log($"EventRoundStart exception: {ex.Message}"); }
             return HookResult.Continue;
         });
 
         // ── Match ended: stop recording ──
         RegisterEventHandler<EventCsWinPanelMatch>((@event, info) =>
         {
-            Log($"[DEBUG] EventCsWinPanelMatch fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _currentDemoName={_currentDemoName}");
-            Log("Match ended — stopping recording.");
-            _isRecordingForbidden = true;
-            StopAndUploadDemo("Match ended");
-            Log($"[DEBUG] EventCsWinPanelMatch handler done — _isRecording={_isRecording} _isRecordingForbidden={_isRecordingForbidden}");
+            try
+            {
+                Log($"[DEBUG] EventCsWinPanelMatch fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _currentDemoName={_currentDemoName}");
+                Log("Match ended — stopping recording.");
+                _isRecordingForbidden = true;
+                _matchEndedAwaitingMapChange = true;
+                StopAndUploadDemo("Match ended");
+                Log($"[DEBUG] EventCsWinPanelMatch handler done — _isRecording={_isRecording} _isRecordingForbidden={_isRecordingForbidden}");
+            }
+            catch (Exception ex) { Log($"EventCsWinPanelMatch exception: {ex.Message}"); }
             return HookResult.Continue;
         });
 
         // ── New match: allow recording again ──
         RegisterEventHandler<EventBeginNewMatch>((@event, info) =>
         {
-            Log($"[DEBUG] EventBeginNewMatch fired — _isChangingLevel={_isChangingLevel} _isRecording={_isRecording} _isRecordingForbidden={_isRecordingForbidden}");
-            if (_isChangingLevel) return HookResult.Continue;
-
-            Log("New match started.");
-            _isRecordingForbidden = false;
             try
             {
+                Log($"[DEBUG] EventBeginNewMatch fired — _isChangingLevel={_isChangingLevel} _isRecording={_isRecording} _isRecordingForbidden={_isRecordingForbidden} _matchEndedAwaitingMapChange={_matchEndedAwaitingMapChange}");
+                if (_isChangingLevel || _matchEndedAwaitingMapChange) return HookResult.Continue;
+
+                Log("New match started.");
+                _isRecordingForbidden = false;
                 if (CountHumans() > 0 && !IsWarmup())
                     StartRecording();
             }
-            catch (Exception ex) { Log($"BeginNewMatch error: {ex.Message}"); }
+            catch (Exception ex) { Log($"EventBeginNewMatch exception: {ex.Message}"); }
             return HookResult.Continue;
         });
 
         // ── Match end restart: block recording during restart ──
         RegisterEventHandler<EventCsMatchEndRestart>((@event, info) =>
         {
-            Log($"[DEBUG] EventCsMatchEndRestart fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden}");
-            Log("Match end restart.");
-            _isRecordingForbidden = true;
+            try
+            {
+                Log($"[DEBUG] EventCsMatchEndRestart fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden}");
+                Log("Match end restart.");
+                _isRecordingForbidden = true;
+            }
+            catch (Exception ex) { Log($"EventCsMatchEndRestart exception: {ex.Message}"); }
             return HookResult.Continue;
         });
 
         // ── Resume after empty-server stop / player connect ──
         RegisterEventHandler<EventPlayerConnectFull>((@event, info) =>
         {
-            Log($"[DEBUG] EventPlayerConnectFull fired — _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _isRecording={_isRecording}");
-            if (_isChangingLevel || _isRecordingForbidden) return HookResult.Continue;
-
-            var player = @event.Userid;
-            if (player == null || !player.IsValid || player.IsBot || player.IsHLTV)
-                return HookResult.Continue;
-
             try
             {
+                Log($"[DEBUG] EventPlayerConnectFull fired — _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _isRecording={_isRecording} _matchEndedAwaitingMapChange={_matchEndedAwaitingMapChange}");
+                if (_isChangingLevel || _isRecordingForbidden || _matchEndedAwaitingMapChange) return HookResult.Continue;
+
+                var player = @event.Userid;
+                if (player == null || !player.IsValid || player.IsBot || player.IsHLTV)
+                    return HookResult.Continue;
+
                 if (!_isRecording)
                 {
                     int humans = CountHumans();
@@ -334,60 +344,78 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                     }
                 }
             }
-            catch (Exception ex) { Log($"PlayerConnectFull error: {ex.Message}"); }
+            catch (Exception ex) { Log($"EventPlayerConnectFull exception: {ex.Message}"); }
             return HookResult.Continue;
         });
 
         // ── Player disconnect: stop if no humans left ──
         RegisterEventHandler<EventPlayerDisconnect>((@event, info) =>
         {
-            Log($"[DEBUG] EventPlayerDisconnect fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden}");
-
-            // Check plugin state FIRST — during map shutdown the engine fires
-            // disconnect events while player entities are being torn down.
-            // Accessing @event.Userid properties on freed native memory segfaults.
-            if (!_isRecording || _isChangingLevel || _isRecordingForbidden)
+            try
             {
-                Log($"[DEBUG] EventPlayerDisconnect — early exit (state guard)");
-                return HookResult.Continue;
-            }
+                Log($"[DEBUG] EventPlayerDisconnect fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _matchEndedAwaitingMapChange={_matchEndedAwaitingMapChange}");
 
-            var player = @event.Userid;
-            bool isNull = player == null;
-            bool isValid = !isNull && player!.IsValid;
-            bool isBot = isValid && player!.IsBot;
-            bool isHltv = isValid && player!.IsHLTV;
-            Log($"[DEBUG] EventPlayerDisconnect — player null={isNull} valid={isValid} bot={isBot} hltv={isHltv}");
-
-            if (isNull || !isValid || isBot || isHltv)
-                return HookResult.Continue;
-
-            Log($"[DEBUG] EventPlayerDisconnect — scheduling NextFrame check for human player");
-            Server.NextFrame(() =>
-            {
-                Log($"[DEBUG] EventPlayerDisconnect NextFrame — _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _isRecording={_isRecording}");
-                // Guard: don't access entities during map transition
-                if (_isChangingLevel || _isRecordingForbidden || !_isRecording)
+                // Check plugin state FIRST — during map shutdown the engine fires
+                // disconnect events while player entities are being torn down.
+                // Accessing @event.Userid properties on freed native memory segfaults.
+                if (!_isRecording || _isChangingLevel || _isRecordingForbidden || _matchEndedAwaitingMapChange)
                 {
-                    Log($"[DEBUG] EventPlayerDisconnect NextFrame — early exit (state guard)");
-                    return;
+                    Log($"[DEBUG] EventPlayerDisconnect — early exit (state guard)");
+                    return HookResult.Continue;
                 }
 
+                // Wrap player entity access in its own try-catch — the native
+                // pointer behind @event.Userid can be freed during engine teardown
+                // even before our state flags are set.
+                bool isHuman = false;
                 try
                 {
-                    int humans = CountHumans();
-                    Log($"[DEBUG] EventPlayerDisconnect NextFrame — humans={humans}");
-                    if (humans == 0)
-                    {
-                        Log("All players disconnected — stopping recording.");
-                        StopAndUploadDemo("All players disconnected");
-                    }
+                    var player = @event.Userid;
+                    bool isNull = player == null;
+                    bool isValid = !isNull && player!.IsValid;
+                    bool isBot = isValid && player!.IsBot;
+                    bool isHltv = isValid && player!.IsHLTV;
+                    Log($"[DEBUG] EventPlayerDisconnect — player null={isNull} valid={isValid} bot={isBot} hltv={isHltv}");
+                    isHuman = !isNull && isValid && !isBot && !isHltv;
                 }
                 catch (Exception ex)
                 {
-                    Log($"PlayerDisconnect NextFrame error: {ex.Message}");
+                    Log($"[DEBUG] EventPlayerDisconnect — exception reading player entity (engine teardown?): {ex.Message}");
+                    return HookResult.Continue;
                 }
-            });
+
+                if (!isHuman) return HookResult.Continue;
+
+                Log($"[DEBUG] EventPlayerDisconnect — scheduling NextFrame check for human player");
+                Server.NextFrame(() =>
+                {
+                    try
+                    {
+                        Log($"[DEBUG] EventPlayerDisconnect NextFrame — _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _isRecording={_isRecording} _matchEndedAwaitingMapChange={_matchEndedAwaitingMapChange}");
+                        if (_isChangingLevel || _isRecordingForbidden || !_isRecording || _matchEndedAwaitingMapChange)
+                        {
+                            Log($"[DEBUG] EventPlayerDisconnect NextFrame — early exit (state guard)");
+                            return;
+                        }
+
+                        int humans = CountHumans();
+                        Log($"[DEBUG] EventPlayerDisconnect NextFrame — humans={humans}");
+                        if (humans == 0)
+                        {
+                            Log("All players disconnected — stopping recording.");
+                            StopAndUploadDemo("All players disconnected");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"PlayerDisconnect NextFrame error: {ex.Message}");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Log($"EventPlayerDisconnect handler exception: {ex.Message}");
+            }
             return HookResult.Continue;
         });
 
@@ -443,43 +471,57 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private void OnMapStart(string mapName)
     {
-        Log($"[DEBUG] OnMapStart({mapName}) — BEFORE reset: _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _currentDemoName={_currentDemoName}");
-        // Reset state — OnMapEnd already stopped recording, but this is
-        // a safety net in case OnMapEnd didn't fire.
-        _isRecording = false;
-        _isRecordingForbidden = false;
-        _isChangingLevel = false;
-        _matchFolder = "";
-        _matchDate = "";
-        KillTimers();
+        try
+        {
+            Log($"[DEBUG] OnMapStart({mapName}) — BEFORE reset: _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _matchEndedAwaitingMapChange={_matchEndedAwaitingMapChange} _currentDemoName={_currentDemoName}");
+            // Reset state — OnMapEnd already stopped recording, but this is
+            // a safety net in case OnMapEnd didn't fire.
+            _isRecording = false;
+            _isRecordingForbidden = false;
+            _isChangingLevel = false;
+            _matchEndedAwaitingMapChange = false;
+            _matchFolder = "";
+            _matchDate = "";
+            KillTimers();
 
-        Log($"Map started: {mapName}");
+            Log($"Map started: {mapName}");
+        }
+        catch (Exception ex) { Log($"OnMapStart exception: {ex.Message}"); }
     }
 
     private void OnMapEnd()
     {
-        Log($"[DEBUG] OnMapEnd fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _currentDemoName={_currentDemoName}");
-        _isChangingLevel = true;
-        _isRecordingForbidden = true;
-        // Skip tv_stoprecord — the engine is already shutting down HLTV
-        // (CHLTVServer::Shutdown). Issuing the command here can crash.
-        StopAndUploadDemo("Map ended", skipStopCommand: true);
-        Log($"[DEBUG] OnMapEnd done — _isRecording={_isRecording}");
+        try
+        {
+            Log($"[DEBUG] OnMapEnd fired — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _currentDemoName={_currentDemoName}");
+            _isChangingLevel = true;
+            _isRecordingForbidden = true;
+            _matchEndedAwaitingMapChange = true;
+            // Skip tv_stoprecord — the engine is already shutting down HLTV
+            // (CHLTVServer::Shutdown). Issuing the command here can crash.
+            StopAndUploadDemo("Map ended", skipStopCommand: true);
+            Log($"[DEBUG] OnMapEnd done — _isRecording={_isRecording}");
+        }
+        catch (Exception ex) { Log($"OnMapEnd exception: {ex.Message}"); }
     }
 
     private void OnServerHibernationUpdate(bool isHibernating)
     {
-        Log($"[DEBUG] OnServerHibernationUpdate({isHibernating}) — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden}");
-        Log($"Server hibernation update: {(isHibernating ? "started" : "ended")}");
-        if (isHibernating)
+        try
         {
-            _isRecordingForbidden = true;
-            StopAndUploadDemo("Server hibernating");
+            Log($"[DEBUG] OnServerHibernationUpdate({isHibernating}) — _isRecording={_isRecording} _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden}");
+            Log($"Server hibernation update: {(isHibernating ? "started" : "ended")}");
+            if (isHibernating)
+            {
+                _isRecordingForbidden = true;
+                StopAndUploadDemo("Server hibernating");
+            }
+            else
+            {
+                _isRecordingForbidden = false;
+            }
         }
-        else
-        {
-            _isRecordingForbidden = false;
-        }
+        catch (Exception ex) { Log($"OnServerHibernationUpdate exception: {ex.Message}"); }
     }
 
     // Allowed changelevel commands — reject anything else to prevent command injection
@@ -490,45 +532,49 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
 
     private HookResult CommandListener_Changelevel(CCSPlayerController? player, CommandInfo commandInfo)
     {
-        Log($"[DEBUG] CommandListener_Changelevel — _isChangingLevel={_isChangingLevel} _isRecording={_isRecording} argCount={commandInfo.ArgCount}");
-        if (_isChangingLevel)
+        try
         {
-            Log($"[DEBUG] CommandListener_Changelevel — already changing level, passing through");
-            // Already handling a changelevel — let the delayed one through
-            return HookResult.Continue;
-        }
-
-        if (_isRecording && commandInfo.ArgCount >= 2)
-        {
-            string command = commandInfo.GetArg(0);
-            string map = commandInfo.GetArg(1);
-
-            // Validate the command is one we expect
-            if (!AllowedChangelevelCommands.Contains(command))
+            Log($"[DEBUG] CommandListener_Changelevel — _isChangingLevel={_isChangingLevel} _isRecording={_isRecording} argCount={commandInfo.ArgCount}");
+            if (_isChangingLevel)
             {
-                Log($"Changelevel interceptor: unexpected command '{command}' — ignoring.");
+                Log($"[DEBUG] CommandListener_Changelevel — already changing level, passing through");
                 return HookResult.Continue;
             }
 
-            // Sanitize the map name — allow only alphanumeric, underscores, hyphens, slashes, dots
-            if (!System.Text.RegularExpressions.Regex.IsMatch(map, @"^[\w\-./]+$"))
+            if (_isRecording && commandInfo.ArgCount >= 2)
             {
-                Log($"Changelevel interceptor: invalid map name '{map}' — ignoring.");
-                return HookResult.Continue;
+                string command = commandInfo.GetArg(0);
+                string map = commandInfo.GetArg(1);
+
+                // Validate the command is one we expect
+                if (!AllowedChangelevelCommands.Contains(command))
+                {
+                    Log($"Changelevel interceptor: unexpected command '{command}' — ignoring.");
+                    return HookResult.Continue;
+                }
+
+                // Sanitize the map name — allow only alphanumeric, underscores, hyphens, slashes, dots
+                if (!System.Text.RegularExpressions.Regex.IsMatch(map, @"^[\w\-./]+$"))
+                {
+                    Log($"Changelevel interceptor: invalid map name '{map}' — ignoring.");
+                    return HookResult.Continue;
+                }
+
+                Log($"Intercepted changelevel: {command} {map}");
+                _isRecordingForbidden = true;
+                _isChangingLevel = true;
+                _matchEndedAwaitingMapChange = true;
+                StopAndUploadDemo("Changelevel");
+
+                // Delay the actual changelevel so the recording flushes cleanly
+                AddTimer(3.0f, () =>
+                {
+                    Server.ExecuteCommand($"{command} {map}");
+                });
+                return HookResult.Stop;
             }
-
-            Log($"Intercepted changelevel: {command} {map}");
-            _isRecordingForbidden = true;
-            _isChangingLevel = true;
-            StopAndUploadDemo("Changelevel");
-
-            // Delay the actual changelevel so the recording flushes cleanly
-            AddTimer(3.0f, () =>
-            {
-                Server.ExecuteCommand($"{command} {map}");
-            });
-            return HookResult.Stop;
         }
+        catch (Exception ex) { Log($"CommandListener_Changelevel exception: {ex.Message}"); }
         return HookResult.Continue;
     }
 
@@ -573,26 +619,30 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         _emptyServerSince = null;
         _playerMonitorTimer = AddTimer(30.0f, () =>
         {
-            if (!_isRecording || _isChangingLevel) return;
-            int humans = CountHumans();
-            if (humans == 0)
+            try
             {
-                if (_emptyServerSince == null)
+                if (!_isRecording || _isChangingLevel || _isRecordingForbidden || _matchEndedAwaitingMapChange) return;
+                int humans = CountHumans();
+                if (humans == 0)
                 {
-                    _emptyServerSince = DateTime.UtcNow;
-                    Log("0 players — 5-minute empty-server countdown started.");
+                    if (_emptyServerSince == null)
+                    {
+                        _emptyServerSince = DateTime.UtcNow;
+                        Log("0 players — 5-minute empty-server countdown started.");
+                    }
+                    else if ((DateTime.UtcNow - _emptyServerSince.Value).TotalSeconds >= 300)
+                    {
+                        Log("Server empty 5+ min — stopping recording.");
+                        StopAndUploadDemo("Empty server");
+                    }
                 }
-                else if ((DateTime.UtcNow - _emptyServerSince.Value).TotalSeconds >= 300)
+                else if (_emptyServerSince != null)
                 {
-                    Log("Server empty 5+ min — stopping recording.");
-                    StopAndUploadDemo("Empty server");
+                    Log($"Player returned ({humans}) — countdown cancelled.");
+                    _emptyServerSince = null;
                 }
             }
-            else if (_emptyServerSince != null)
-            {
-                Log($"Player returned ({humans}) — countdown cancelled.");
-                _emptyServerSince = null;
-            }
+            catch (Exception ex) { Log($"Player monitor timer exception: {ex.Message}"); }
         }, TimerFlags.REPEAT);
     }
 
