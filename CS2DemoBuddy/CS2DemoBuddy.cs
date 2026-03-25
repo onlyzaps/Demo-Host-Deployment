@@ -310,10 +310,10 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // ── Resume after empty-server stop / player connect ──
         RegisterEventHandler<EventPlayerConnectFull>((@event, info) =>
         {
-            if (_isChangingLevel) return HookResult.Continue;
+            if (_isChangingLevel || _isRecordingForbidden) return HookResult.Continue;
 
             var player = @event.Userid;
-            if (player == null || player.IsBot || player.IsHLTV)
+            if (player == null || !player.IsValid || player.IsBot || player.IsHLTV)
                 return HookResult.Continue;
 
             try
@@ -334,12 +334,14 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
         // ── Player disconnect: stop if no humans left ──
         RegisterEventHandler<EventPlayerDisconnect>((@event, info) =>
         {
-            var player = @event.Userid;
-            if (player == null || player.IsBot || player.IsHLTV)
+            // Check plugin state FIRST — during map shutdown the engine fires
+            // disconnect events while player entities are being torn down.
+            // Accessing @event.Userid properties on freed native memory segfaults.
+            if (!_isRecording || _isChangingLevel || _isRecordingForbidden)
                 return HookResult.Continue;
 
-            // Don't schedule any work if already shutting down or not recording
-            if (!_isRecording || _isChangingLevel || _isRecordingForbidden)
+            var player = @event.Userid;
+            if (player == null || !player.IsValid || player.IsBot || player.IsHLTV)
                 return HookResult.Continue;
 
             Server.NextFrame(() =>
