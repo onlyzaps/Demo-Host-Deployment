@@ -328,9 +328,20 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 Log($"[DEBUG] EventPlayerConnectFull fired — _isChangingLevel={_isChangingLevel} _isRecordingForbidden={_isRecordingForbidden} _isRecording={_isRecording} _matchEndedAwaitingMapChange={_matchEndedAwaitingMapChange}");
                 if (_isChangingLevel || _isRecordingForbidden || _matchEndedAwaitingMapChange) return HookResult.Continue;
 
-                var player = @event.Userid;
-                if (player == null || !player.IsValid || player.IsBot || player.IsHLTV)
+                // Wrap player entity access in its own try-catch — the native
+                // pointer behind @event.Userid can be invalid during engine
+                // transitions even before our state flags are set.
+                try
+                {
+                    var player = @event.Userid;
+                    if (player == null || !player.IsValid || player.IsBot || player.IsHLTV)
+                        return HookResult.Continue;
+                }
+                catch (Exception ex)
+                {
+                    Log($"[DEBUG] EventPlayerConnectFull — exception reading player entity: {ex.Message}");
                     return HookResult.Continue;
+                }
 
                 if (!_isRecording)
                 {
@@ -477,7 +488,11 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             // Reset state — OnMapEnd already stopped recording, but this is
             // a safety net in case OnMapEnd didn't fire.
             _isRecording = false;
-            _isRecordingForbidden = false;
+            // Keep _isRecordingForbidden = true so that EventPlayerConnectFull
+            // does NOT access native player entities during the map-load frame.
+            // EventRoundStart / EventBeginNewMatch will clear it once the
+            // engine is in a stable state.
+            _isRecordingForbidden = true;
             _isChangingLevel = false;
             _matchEndedAwaitingMapChange = false;
             _matchFolder = "";
@@ -518,7 +533,10 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
             }
             else
             {
-                _isRecordingForbidden = false;
+                // Don't clear _isRecordingForbidden here — EventRoundStart
+                // will clear it once the engine is fully stable.  Clearing it
+                // on hibernate-end can undo map-transition protection.
+                Log($"[DEBUG] OnServerHibernationUpdate — hibernate ended, _isRecordingForbidden left as-is ({_isRecordingForbidden})");
             }
         }
         catch (Exception ex) { Log($"OnServerHibernationUpdate exception: {ex.Message}"); }
@@ -541,6 +559,15 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 return HookResult.Continue;
             }
 
+            // Always set transition flags when a changelevel is detected,
+            // even when not recording.  This prevents EventPlayerConnectFull
+            // and disconnect handlers from accessing native entities between
+            // now and OnMapStart's reset.
+            _isChangingLevel = true;
+            _isRecordingForbidden = true;
+            _matchEndedAwaitingMapChange = true;
+            Log($"[DEBUG] CommandListener_Changelevel — transition flags set");
+
             if (_isRecording && commandInfo.ArgCount >= 2)
             {
                 string command = commandInfo.GetArg(0);
@@ -561,9 +588,6 @@ public class CS2DemoBuddyPlugin : BasePlugin, IPluginConfig<CS2DemoBuddyConfig>
                 }
 
                 Log($"Intercepted changelevel: {command} {map}");
-                _isRecordingForbidden = true;
-                _isChangingLevel = true;
-                _matchEndedAwaitingMapChange = true;
                 StopAndUploadDemo("Changelevel");
 
                 // Delay the actual changelevel so the recording flushes cleanly
